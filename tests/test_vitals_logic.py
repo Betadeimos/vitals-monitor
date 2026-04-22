@@ -64,5 +64,34 @@ class TestVitalsLogic(unittest.TestCase):
         self.assertEqual(state, vitals.LIFE_SUPPORT)
         self.assertIn("NOT RESPONDING", msg)
 
+    def test_determine_state_string_config(self):
+        # Verify that string values in config are correctly cast to floats
+        original_cpu_threshold = vitals.CONFIG["tier1"]["cpu_threshold_percent"]
+        original_ram_threshold = vitals.CONFIG["tier2"]["system_ram_threshold_percent"]
+        original_window = vitals.CONFIG["tier1"]["ram_spike_window_seconds"]
+        
+        try:
+            vitals.CONFIG["tier1"]["cpu_threshold_percent"] = "80.0"
+            vitals.CONFIG["tier2"]["system_ram_threshold_percent"] = "90.0"
+            vitals.CONFIG["tier1"]["ram_spike_window_seconds"] = "2.0"
+            
+            metrics = {'cpu_percent': 98.0, 'memory_gb': 1.0}
+            system_ram_percent = 50.0
+            
+            state, msg = vitals.determine_state(metrics, system_ram_percent, self.tracker, threshold_gb="0.1")
+            self.assertEqual(state, vitals.WARNING)
+            self.assertIn("High CPU usage", msg)
+            
+            metrics = {'cpu_percent': 10.0, 'memory_gb': 1.0}
+            system_ram_percent = 95.0
+            
+            state, msg = vitals.determine_state(metrics, system_ram_percent, self.tracker, threshold_gb="0.1")
+            self.assertEqual(state, vitals.CRITICAL)
+            self.assertIn("System RAM > 90.0%", msg)
+        finally:
+            vitals.CONFIG["tier1"]["cpu_threshold_percent"] = original_cpu_threshold
+            vitals.CONFIG["tier2"]["system_ram_threshold_percent"] = original_ram_threshold
+            vitals.CONFIG["tier1"]["ram_spike_window_seconds"] = original_window
+
 if __name__ == '__main__':
     unittest.main()

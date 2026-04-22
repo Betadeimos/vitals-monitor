@@ -12,40 +12,27 @@ class TestVitalsStorageMapping(unittest.TestCase):
 
     @patch('vitals_core.get_physical_drive_name')
     @patch('psutil.disk_io_counters')
-    @patch('time.time')
-    def test_get_storage_metrics_physical_mapping(self, mock_time, mock_io_counters, mock_get_drive_name):
-        # Reset global state for test
-        vitals_core._last_disk_io = {}
-        vitals_core._last_disk_time = 0
-
+    @patch('time.perf_counter')
+    @patch('time.sleep')
+    def test_get_storage_metrics_physical_mapping(self, mock_sleep, mock_perf, mock_io_counters, mock_get_drive_name):
         # Mock the mapping: C: -> PhysicalDrive1, D: -> PhysicalDrive0
         mock_get_drive_name.side_effect = lambda dl: "PhysicalDrive1" if "C" in dl else "PhysicalDrive0"
 
-        # First call (baseline)
-        mock_time.return_value = 1000.0
-        mock_io_0 = {
-            'PhysicalDrive1': MagicMock(read_time=100, write_time=50),
-            'PhysicalDrive0': MagicMock(read_time=200, write_time=100)
-        }
-        mock_io_counters.return_value = mock_io_0
+        mock_perf.side_effect = [1000.0, 1000.1] # dt_s = 0.1
         
-        metrics_1 = vitals_core.get_storage_metrics()
-        self.assertIn('C', metrics_1)
-        self.assertIn('D', metrics_1)
-        self.assertEqual(metrics_1['C']['utilization_percent'], 0.0)
+        c1 = MagicMock(read_time=100, write_time=50, read_bytes=1000, write_bytes=500)
+        c2 = MagicMock(read_time=110, write_time=60, read_bytes=1100, write_bytes=600) # delta_busy = 20ms
+        
+        mock_io_counters.side_effect = [
+            {'PhysicalDrive1': c1, 'PhysicalDrive0': c1},
+            {'PhysicalDrive1': c2, 'PhysicalDrive0': c2}
+        ]
 
-        # Second call (1 second later)
-        mock_time.return_value = 1001.0 # delta = 1000ms
-        mock_io_1 = {
-            'PhysicalDrive1': MagicMock(read_time=200, write_time=150), # delta busy = 200ms
-            'PhysicalDrive0': MagicMock(read_time=300, write_time=200)  # delta busy = 200ms
-        }
-        mock_io_counters.return_value = mock_io_1
+        metrics = vitals_core.get_storage_metrics()
         
-        metrics_2 = vitals_core.get_storage_metrics()
-        # utilization = (200 / 1000) * 100 = 20.0%
-        self.assertEqual(metrics_2['C']['utilization_percent'], 20.0)
-        self.assertEqual(metrics_2['D']['utilization_percent'], 20.0)
+        # util = (20ms / (0.1s * 1000)) * 100 = 20.0%
+        self.assertEqual(metrics['C']['utilization_percent'], 20.0)
+        self.assertEqual(metrics['D']['utilization_percent'], 20.0)
 
     def test_get_physical_drive_name_real(self):
         # On Windows, we should get something like PhysicalDriveX

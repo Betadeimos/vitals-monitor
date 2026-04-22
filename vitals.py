@@ -4,9 +4,12 @@ import time
 import argparse
 import threading
 import json
+import re
 from collections import deque
 import psutil
 import vitals_core
+
+ANSI_ESCAPE = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
 
 if os.name == 'nt':
     import msvcrt
@@ -125,6 +128,7 @@ GREEN = "\033[32m"
 YELLOW = "\033[33m"
 ORANGE = "\033[38;5;208m"
 WHITE = "\033[37m"
+RED = "\033[31m"
 RED_BLINK = "\033[1;5;31m"
 MOVE_CURSOR_TOP = "\033[H"
 CLEAR_SCREEN = "\033[2J"
@@ -154,26 +158,29 @@ def determine_state(metrics, system_ram_percent, tracker, threshold_gb=None, is_
     Tier 3 (Life Support): Triggered if the process is not responding.
     """
     if threshold_gb is None:
-        threshold_gb = CONFIG["tier1"]["ram_spike_threshold_gb"]
+        threshold_gb = float(CONFIG["tier1"]["ram_spike_threshold_gb"])
+    else:
+        threshold_gb = float(threshold_gb)
 
     if not is_responding:
         return LIFE_SUPPORT, "Process is NOT RESPONDING (Hung)"
 
-    if system_ram_percent > CONFIG["tier2"]["system_ram_threshold_percent"]:
-        return CRITICAL, f"System RAM > {CONFIG['tier2']['system_ram_threshold_percent']}% ({system_ram_percent:.1f}%)"
+    system_ram_threshold = float(CONFIG["tier2"]["system_ram_threshold_percent"])
+    if system_ram_percent > system_ram_threshold:
+        return CRITICAL, f"System RAM > {system_ram_threshold}% ({system_ram_percent:.1f}%)"
     
     is_spike = tracker.check_threshold(threshold_gb)
-    is_high_cpu = metrics['cpu_percent'] > CONFIG["tier1"]["cpu_threshold_percent"]
+    is_high_cpu = metrics['cpu_percent'] > float(CONFIG["tier1"]["cpu_threshold_percent"])
     
     if is_spike or is_high_cpu:
         reasons = []
-        if is_spike: reasons.append(f"Memory spike detected (>{threshold_gb}GB in {CONFIG['tier1']['ram_spike_window_seconds']}s)")
+        if is_spike: reasons.append(f"Memory spike detected (>{threshold_gb}GB in {float(CONFIG['tier1']['ram_spike_window_seconds'])}s)")
         if is_high_cpu: reasons.append(f"High CPU usage ({metrics['cpu_percent']:.1f}%)")
         return WARNING, " | ".join(reasons)
     
     return NORMAL, ""
 
-def set_priority(proc, new_state, current_state=None):
+def set_priority(proc, new_state, current_state=None, ctx=None):
     """
     Adjusts the target process priority based on the current state.
     """
@@ -188,8 +195,10 @@ def set_priority(proc, new_state, current_state=None):
             else:
                 # Unix: Higher nice value means lower priority
                 proc.nice(10)
-            print(f"{CLEAR_LINE}{YELLOW}[INFO] Throttling process priority for stability...{RESET}")
-            time.sleep(1) # Give user a moment to see the message
+            if ctx:
+                ctx['status_msg'] = "[INFO] Throttling process priority for stability..."
+            else:
+                print(f"{CLEAR_LINE}[INFO] Throttling process priority for stability...")
         elif new_state == NORMAL and current_state == WARNING:
             if os.name == 'nt':
                 # Windows: NORMAL_PRIORITY_CLASS
@@ -197,16 +206,19 @@ def set_priority(proc, new_state, current_state=None):
             else:
                 # Unix: 0 is normal priority
                 proc.nice(0)
-            print(f"{CLEAR_LINE}{CYAN}[INFO] Restoring process priority.{RESET}")
-            time.sleep(1)
+            if ctx:
+                ctx['status_msg'] = "[INFO] Restoring process priority."
+            else:
+                print(f"{CLEAR_LINE}[INFO] Restoring process priority.")
     except (psutil.AccessDenied, psutil.NoSuchProcess):
         # Gracefully handle if we can't change priority
         pass
 
-def apply_life_support(proc, saved_context):
+def apply_life_support(proc, ctx):
     """
     Saves current process affinity and priority, then throttles them.
     """
+    saved_context = ctx['ls_context']
     if saved_context.get('affinity') is not None:
         return # Already applied
     
@@ -216,7 +228,7 @@ def apply_life_support(proc, saved_context):
         saved_context['priority'] = proc.nice()
         
         # Throttling
-        print(f"{CLEAR_LINE}{ORANGE}[LIFE SUPPORT] Throttling cores & priority...{RESET}")
+        ctx['status_msg'] = "[LIFE SUPPORT] Throttling cores & priority..."
         
         # Affinity: exclude cores from config if possible
         count = psutil.cpu_count() or 1
@@ -232,7 +244,7 @@ def apply_life_support(proc, saved_context):
         try:
             proc.cpu_affinity(new_affinity)
         except (psutil.AccessDenied, PermissionError):
-            print(f"{CLEAR_LINE}{RED_BLINK}[ERROR] Administrator privileges required for CPU affinity throttling.{RESET}")
+             ctx['status_msg'] = "[ERROR] Admin privileges required for affinity throttling."
         
         # Priority: IDLE
         if os.name == 'nt':
@@ -247,25 +259,57 @@ def apply_life_support(proc, saved_context):
         saved_context['affinity'] = None
         saved_context['priority'] = None
 
-def restore_life_support(proc, saved_context):
+def restore_life_support(proc, ctx):
     """
     Restores original process affinity and priority.
     """
+    saved_context = ctx['ls_context']
     if saved_context.get('affinity') is None:
         return
         
     try:
-        print(f"{CLEAR_LINE}{CYAN}[LIFE SUPPORT] Restoring original affinity & priority.{RESET}")
+        ctx['status_msg'] = "[LIFE SUPPORT] Restoring original affinity & priority."
         try:
             proc.cpu_affinity(saved_context['affinity'])
         except (psutil.AccessDenied, PermissionError):
-            print(f"{CLEAR_LINE}{RED_BLINK}[ERROR] Administrator privileges required for CPU affinity throttling.{RESET}")
+            ctx['status_msg'] = "[ERROR] Admin privileges required for affinity restoration."
         proc.nice(saved_context['priority'])
     except (psutil.AccessDenied, psutil.NoSuchProcess):
         pass
     finally:
         saved_context['affinity'] = None
         saved_context['priority'] = None
+
+def get_usage_color(percent):
+    if percent <= 50:
+        return GREEN
+    elif percent <= 75:
+        return YELLOW
+    elif percent <= 90:
+        return ORANGE
+    else:
+        return RED_BLINK
+
+def draw_shared_vram_bar(shared_used_gb):
+    bar_length = 40
+    if shared_used_gb <= 0:
+        color = GREEN
+    else:
+        color = RED # Bleeding detected
+        
+    label_str = f"{color}{'SHARED GPU':<12}{RESET}"
+    border_open = f"{CYAN}[{RESET}"
+    border_close = f"{CYAN}]{RESET}"
+    
+    # 1 block per 0.5 GB, max 40 blocks (20 GB)
+    filled_length = min(int(shared_used_gb * 2), bar_length)
+    if shared_used_gb > 0 and filled_length == 0:
+        filled_length = 1
+        
+    bar_str = '■' * filled_length + '-' * (bar_length - filled_length)
+    colored_bar = f"{color}{bar_str}{RESET}"
+    
+    return f"{label_str} {border_open}{colored_bar}{border_close} {shared_used_gb:.2f} GB"
 
 def draw_bar(label, value, max_value, bar_length=40, char='■', state=NORMAL):
     ratio = min(max(value / max_value, 0.0), 1.0)
@@ -280,7 +324,8 @@ def draw_bar(label, value, max_value, bar_length=40, char='■', state=NORMAL):
     else:
         color = GREEN
     
-    label_str = f"{CYAN}{label:<12}{RESET}"
+    label_color = get_usage_color(ratio * 100)
+    label_str = f"{label_color}{label:<12}{RESET}"
     bar_str = char * filled_length + '-' * (bar_length - filled_length)
     colored_bar = f"{color}{bar_str}{RESET}"
     border_open = f"{CYAN}[{RESET}"
@@ -293,6 +338,7 @@ def draw_stacked_ram_bar(target_gb, state=NORMAL):
     vm = psutil.virtual_memory()
     total_gb = vm.total / (1024 ** 3)
     used_gb = vm.used / (1024 ** 3)
+    system_ram_percent = (used_gb / total_gb) * 100
     
     # Other Apps RAM = Total System Used - Target Process RAM
     other_gb = max(used_gb - target_gb, 0.0)
@@ -302,14 +348,20 @@ def draw_stacked_ram_bar(target_gb, state=NORMAL):
     
     other_chars = int(bar_length * other_ratio)
     target_chars = int(bar_length * target_ratio)
-    free_chars = max(bar_length - other_chars - target_chars, 0)
     
-    # Ensure the bar is exactly bar_length
-    if (other_chars + target_chars + free_chars) < bar_length:
-        free_chars += (bar_length - (other_chars + target_chars + free_chars))
-    elif (other_chars + target_chars + free_chars) > bar_length:
-        if other_chars > 0: other_chars -= 1
-        elif target_chars > 0: target_chars -= 1
+    # Ensure at least 1 char if there is some usage but it rounds to 0
+    if other_gb > 0 and other_chars == 0: other_chars = 1
+    if target_gb > 0 and target_chars == 0: target_chars = 1
+
+    # Check if we exceed bar_length
+    if other_chars + target_chars > bar_length:
+        excess = (other_chars + target_chars) - bar_length
+        if other_chars >= excess:
+            other_chars -= excess
+        else:
+            target_chars -= excess
+
+    free_chars = max(bar_length - other_chars - target_chars, 0)
 
     if state in (CRITICAL, HUNG):
         target_color = RED_BLINK
@@ -325,19 +377,23 @@ def draw_stacked_ram_bar(target_gb, state=NORMAL):
     target_bar = f"{target_color}{'■' * target_chars}{RESET}"
     free_bar = "-" * free_chars
     
-    label_str = f"{target_color}{'RAM':<12}{RESET}"
+    label_color = get_usage_color(system_ram_percent)
+    label_str = f"{label_color}{'RAM':<12}{RESET}"
     border_open = f"{CYAN}[{RESET}"
     border_close = f"{CYAN}]{RESET}"
     
-    system_ram_percent = (used_gb / total_gb) * 100
     return f"{label_str} {border_open}{other_bar}{target_bar}{free_bar}{border_close} {system_ram_percent:.1f}%"
 
-def draw_stacked_cpu_bar(target_cpu_percent, state=NORMAL):
+def draw_stacked_cpu_bar(target_cpu_percent, system_cpu_percent=None, state=NORMAL):
     bar_length = 40
-    total_system_cpu = psutil.cpu_percent()
+    
+    # Use provided system cpu or sample it (fallback)
+    if system_cpu_percent is None:
+        system_cpu_percent = psutil.cpu_percent()
     
     # Other Apps CPU = Total System CPU - Target Process CPU
-    other_cpu = max(total_system_cpu - target_cpu_percent, 0.0)
+    # Ensure other_cpu doesn't go below 0 if target measurement exceeds system (can happen due to timing)
+    other_cpu = max(system_cpu_percent - target_cpu_percent, 0.0)
     
     # ratios are based on 100.0%
     other_ratio = other_cpu / 100.0
@@ -346,6 +402,12 @@ def draw_stacked_cpu_bar(target_cpu_percent, state=NORMAL):
     other_chars = int(round(bar_length * other_ratio))
     target_chars = int(round(bar_length * target_ratio))
     
+    # Ensure we show at least 1 colored block if there is usage > 0%
+    if target_cpu_percent > 0.0 and target_chars == 0:
+        target_chars = 1
+    if other_cpu > 0.0 and other_chars == 0:
+        other_chars = 1
+
     if other_chars + target_chars > bar_length:
         excess = (other_chars + target_chars) - bar_length
         if other_chars >= excess:
@@ -369,11 +431,12 @@ def draw_stacked_cpu_bar(target_cpu_percent, state=NORMAL):
     target_bar = f"{target_color}{'■' * target_chars}{RESET}"
     idle_bar = "-" * idle_chars
     
-    label_str = f"{target_color}{'CPU':<12}{RESET}"
+    label_color = get_usage_color(system_cpu_percent)
+    label_str = f"{label_color}{'CPU':<12}{RESET}"
     border_open = f"{CYAN}[{RESET}"
     border_close = f"{CYAN}]{RESET}"
     
-    return f"{label_str} {border_open}{other_bar}{target_bar}{idle_bar}{border_close} {total_system_cpu:.1f}%"
+    return f"{label_str} {border_open}{other_bar}{target_bar}{idle_bar}{border_close} {system_cpu_percent:.1f}%"
 
 def draw_stacked_vram_bar(vram_metrics, state=NORMAL):
     bar_length = 40
@@ -381,10 +444,18 @@ def draw_stacked_vram_bar(vram_metrics, state=NORMAL):
     total_gb = vram_metrics['total_gb']
     process_gb = vram_metrics.get('process_vram_gb', 0.0)
 
-    if process_gb is None or total_gb <= 0:
-        # Fallback to standard bar but showing percentage
-        return draw_bar("VRAM [GPU]", used_gb, total_gb, state=state)
+    if process_gb is None:
+        process_gb = 0.0
+
+    if total_gb <= 0:
+        # Fallback if no VRAM info
+        label_str = f"{WHITE}{'VRAM [GPU]':<12}{RESET}"
+        border_open = f"{CYAN}[{RESET}"
+        border_close = f"{CYAN}]{RESET}"
+        return f"{label_str} {border_open}{'-' * bar_length}{border_close} N/A"
     
+    vram_percent = (used_gb / total_gb) * 100
+
     # Other Apps VRAM = Total System Used - Target Process VRAM
     other_gb = max(used_gb - process_gb, 0.0)
     
@@ -393,14 +464,28 @@ def draw_stacked_vram_bar(vram_metrics, state=NORMAL):
     
     other_chars = int(bar_length * other_ratio)
     target_chars = int(bar_length * target_ratio)
+    
+    # Ensure at least 1 char if there is some usage but it rounds to 0
+    if other_gb > 0 and other_chars == 0: other_chars = 1
+    if process_gb > 0 and target_chars == 0: target_chars = 1
+    
+    # Check if we exceed bar_length
+    if other_chars + target_chars > bar_length:
+        excess = (other_chars + target_chars) - bar_length
+        if other_chars > excess:
+            other_chars -= excess
+        else:
+            target_chars = bar_length - other_chars
+            
     free_chars = max(bar_length - other_chars - target_chars, 0)
     
     # Ensure the bar is exactly bar_length
-    if (other_chars + target_chars + free_chars) < bar_length:
-        free_chars += (bar_length - (other_chars + target_chars + free_chars))
-    elif (other_chars + target_chars + free_chars) > bar_length:
-        if other_chars > 0: other_chars -= 1
-        elif target_chars > 0: target_chars -= 1
+    total_chars = other_chars + target_chars + free_chars
+    if total_chars < bar_length:
+        free_chars += (bar_length - total_chars)
+    elif total_chars > bar_length:
+        # Should not happen with logic above, but for safety:
+        free_chars = max(0, bar_length - other_chars - target_chars)
 
     if state in (CRITICAL, HUNG):
         target_color = RED_BLINK
@@ -416,94 +501,154 @@ def draw_stacked_vram_bar(vram_metrics, state=NORMAL):
     target_bar = f"{target_color}{'■' * target_chars}{RESET}"
     free_bar = "-" * free_chars
     
-    label_str = f"{target_color}{'VRAM':<12}{RESET}"
+    label_color = get_usage_color(vram_percent)
+    label_str = f"{label_color}{'VRAM [GPU]':<12}{RESET}"
     border_open = f"{CYAN}[{RESET}"
     border_close = f"{CYAN}]{RESET}"
     
-    vram_percent = (used_gb / total_gb) * 100
     return f"{label_str} {border_open}{other_bar}{target_bar}{free_bar}{border_close} {vram_percent:.1f}%"
 
-def render_ui(metrics, storage_metrics=None, vram_metrics=None, state=NORMAL, warning_msg=""):
+def render_ui(metrics=None, storage_metrics=None, vram_metrics=None, system_cpu=None, state=NORMAL, warning_msg="", instances=None):
+    WIDTH = 80
+    border_line = f"{CYAN}+{'='*(WIDTH-2)}+{RESET}"
+    separator_line = f"{CYAN}| {'-'*(WIDTH-4)} |{RESET}"
+    
+    def format_line(content, align='left'):
+        vis_len = len(ANSI_ESCAPE.sub('', content))
+        pad = max(0, (WIDTH - 4) - vis_len)
+        if align == 'center':
+            left = pad // 2
+            right = pad - left
+            return f"{CYAN}| {RESET}{' ' * left}{content}{' ' * right}{CYAN} |{RESET}"
+        else:
+            return f"{CYAN}| {RESET}{content}{' ' * pad}{CYAN} |{RESET}"
+            
     lines = []
-    border_line = f"{CYAN}{'='*60}{RESET}"
     
     # Header
     header_text = "V I T A L S   M O N I T O R"
     lines.append(border_line)
-    lines.append(f"{CYAN}{header_text:^60}{RESET}")
+    lines.append(format_line(f"{WHITE}{header_text}{RESET}", align='center'))
     lines.append(border_line)
     
-    # Status Matrix
-    priority_raw = metrics.get('priority', 'N/A')
-    priority_val = PRIORITY_MAP.get(priority_raw, str(priority_raw))
-    
-    affinity_list = metrics.get('cpu_affinity')
-    if isinstance(affinity_list, list):
-        allowed_cores = len(affinity_list)
-        total_cores = psutil.cpu_count()
-        affinity_val = f"{allowed_cores}/{total_cores}"
-    else:
-        affinity_val = 'N/A'
-        
-    status_matrix = f"{CYAN}[ PRIORITY: {priority_val:<12} ] [ CORES: {affinity_val:<5} ]{RESET}"
-    padding_matrix = max(0, (60 - len(status_matrix.replace(CYAN, "").replace(RESET, ""))) // 2)
-    lines.append(f"{' ' * padding_matrix}{status_matrix}")
-    
-    # CPU (Stacked)
-    cpu_str = draw_stacked_cpu_bar(metrics['cpu_percent'], state=state)
-    lines.append(cpu_str)
-    
-    # RAM (Stacked)
-    ram_str = draw_stacked_ram_bar(metrics['memory_gb'], state=state)
-    lines.append(ram_str)
-    
-    # System Metrics (Storage & VRAM)
-    if storage_metrics or vram_metrics is not None:
-        lines.append(f"{CYAN}{'-' * 60}{RESET}")
-        
-        if storage_metrics:
-            for drive in sorted(storage_metrics.keys()):
-                data = storage_metrics[drive]
-                lines.append(draw_bar(f"DISK {drive}", data['utilization_percent'], 100, state=NORMAL))
-        
-        if vram_metrics:
-            vram_state = NORMAL
-            if vram_metrics['total_gb'] > 0 and (vram_metrics['used_gb'] / vram_metrics['total_gb']) > 0.9:
-                vram_state = LIFE_SUPPORT # ORANGE
-            lines.append(draw_stacked_vram_bar(vram_metrics, state=vram_state))
-        else:
-            lines.append(f"{YELLOW}[VRAM: NVIDIA DRIVER NOT FOUND]{RESET}")
+    # GLOBAL SYSTEM METRICS
+    if storage_metrics:
+        lines.append(format_line(f"{WHITE}GLOBAL SYSTEM METRICS{RESET}", align='center'))
+        for drive in sorted(storage_metrics.keys()):
+            data = storage_metrics[drive]
+            lines.append(format_line(draw_bar(f"DISK {drive}", data['utilization_percent'], 100, state=NORMAL)))
+        lines.append(border_line)
 
-    lines.append(f"{CYAN}{'-' * 60}{RESET}")
-    
-    if state == CRITICAL:
-        lines.append(f"{RED_BLINK}!!! CRITICAL: SYSTEM RAM EXHAUSTED !!!{RESET}")
-        lines.append(f"{RED_BLINK}{warning_msg}{RESET}")
-    elif state == LIFE_SUPPORT:
-        lines.append(f"{ORANGE}!!! LIFE SUPPORT: THROTTLING CORES & PRIORITY !!!{RESET}")
-        lines.append(f"{ORANGE}{warning_msg}{RESET}")
-    elif state == HUNG:
-        lines.append(f"{RED_BLINK}!!! PROCESS HUNG (NOT RESPONDING) !!!{RESET}")
-        lines.append(f"{RED_BLINK}{warning_msg}{RESET}")
-    elif state == WARNING:
-        lines.append(f"{YELLOW}--- WARNING: STABILIZING RESOURCES ---{RESET}")
-        lines.append(f"{YELLOW}{warning_msg}{RESET}")
-    else:
-        lines.append(f"{GREEN}Status: Normal{RESET}")
-        lines.append("") # Consistent height padding
-    
-    lines.append(border_line)
+    if instances is None:
+        instances = [{'metrics': metrics, 'vram_metrics': vram_metrics, 'state': state, 'warning_msg': warning_msg, 'pid': None, 'title': None}]
+        
+    for idx, inst in enumerate(instances):
+        i_metrics = inst.get('metrics')
+        i_vram = inst.get('vram_metrics')
+        i_state = inst.get('state', NORMAL)
+        i_msg = inst.get('warning_msg', '')
+        i_pid = inst.get('pid')
+        i_title = inst.get('title')
+        i_status = inst.get('status_msg')
+
+        if i_pid is not None:
+            cleaned_title = vitals_core.clean_title(i_title, max_length=40)
+            title_str = f" [{cleaned_title}]" if cleaned_title else ""
+            inst_header = f"INSTANCE: PID {i_pid}{title_str}"
+            lines.append(format_line(f"{WHITE}{inst_header}{RESET}", align='center'))
+        
+        if not i_metrics:
+            continue
+            
+        # Status Matrix
+        priority_raw = i_metrics.get('priority', 'N/A')
+        priority_val = PRIORITY_MAP.get(priority_raw, str(priority_raw))
+        
+        affinity_list = i_metrics.get('cpu_affinity')
+        if isinstance(affinity_list, list):
+            allowed_cores = len(affinity_list)
+            total_cores = psutil.cpu_count() or 1
+            affinity_val = f"{allowed_cores}/{total_cores}"
+        else:
+            affinity_val = 'N/A'
+            
+        status_matrix = f"{CYAN}[ PRIORITY: {priority_val:<12} ] [ CORES: {affinity_val:<5} ]{RESET}"
+        lines.append(format_line(status_matrix, align='center'))
+        
+        # CPU (Stacked)
+        cpu_str = draw_stacked_cpu_bar(i_metrics['cpu_percent'], system_cpu_percent=system_cpu, state=i_state)
+        lines.append(format_line(cpu_str))
+        
+        # RAM (Stacked)
+        ram_str = draw_stacked_ram_bar(i_metrics['memory_gb'], state=i_state)
+        lines.append(format_line(ram_str))
+        
+        # System Metrics (VRAM)
+        if i_vram is not None or (metrics is not None and vram_metrics is None):
+            lines.append(separator_line)
+            
+            if i_vram is not None:
+                shared_gb = i_vram.get('shared_used_gb', 0.0)
+                
+                vram_state = NORMAL
+                # If bleeding into shared memory, force RED/CRITICAL state
+                if shared_gb > 0:
+                    vram_state = CRITICAL
+                elif i_vram['total_gb'] > 0 and (i_vram['used_gb'] / i_vram['total_gb']) > 0.9:
+                    vram_state = LIFE_SUPPORT # ORANGE
+                
+                lines.append(format_line(draw_stacked_vram_bar(i_vram, state=vram_state)))
+                
+                # SHARED GPU line
+                lines.append(format_line(draw_shared_vram_bar(shared_gb)))
+                
+                if shared_gb > 0:
+                    lines.append(format_line(f"{RED_BLINK}!!! WARNING: SHARED GPU MEMORY SPILLAGE !!!{RESET}", align='center'))
+            else:
+                lines.append(format_line(f"{YELLOW}{'VRAM':<12} [VRAM: NVIDIA DRIVER NOT FOUND]{RESET}"))
+
+        lines.append(separator_line)
+        
+        # Message Line
+        if i_status:
+            if i_state == WARNING:
+                msg_line = f"{YELLOW}{i_status}{RESET}"
+            elif i_state == LIFE_SUPPORT:
+                msg_line = f"{ORANGE}{i_status}{RESET}"
+            else:
+                msg_line = f"{CYAN}{i_status}{RESET}"
+        elif i_state == CRITICAL:
+            msg_line = f"{RED_BLINK}!!! CRITICAL: SYSTEM RAM EXHAUSTED !!!{RESET}"
+        elif i_state == LIFE_SUPPORT:
+            msg_line = f"{ORANGE}!!! LIFE SUPPORT: THROTTLING CORES & PRIORITY !!!{RESET}"
+        elif i_state == HUNG:
+            msg_line = f"{RED_BLINK}!!! PROCESS HUNG (NOT RESPONDING) !!!{RESET}"
+        elif i_state == WARNING:
+            msg_line = f"{YELLOW}--- WARNING: STABILIZING RESOURCES ---{RESET}"
+        else:
+            msg_line = f"{GREEN}[ STATUS: MONITORING ACTIVE ]{RESET}"
+            
+        detail_line = f"{i_msg[:70]:<70}" if i_msg else ""
+        
+        lines.append(format_line(msg_line, align='center'))
+        if i_msg:
+            color = RED_BLINK if i_state in (CRITICAL, HUNG) else (ORANGE if i_state == LIFE_SUPPORT else YELLOW)
+            lines.append(format_line(f"{color}{detail_line}{RESET}", align='center'))
+        else:
+            lines.append(format_line("", align='center'))
+
+        
+        lines.append(border_line)
         
     return "\n".join([line + CLEAR_LINE for line in lines])
-
 def parse_args():
     parser = argparse.ArgumentParser(
         description=f"{CYAN}V I T A L S   W A T C H D O G\nReal-time resource monitor and crash predictor.{RESET}",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=f"{CYAN}Usage Examples:\n  python vitals.py\n  python vitals.py 3dsmax --threshold 0.25\n  python vitals.py my_app -t 0.1 -i 1.0{RESET}"
     )
-    parser.add_argument('target', nargs='?', default='max_simulator', 
-                        help='Target process name to monitor (default: max_simulator)')
+    parser.add_argument('target', nargs='?', default=None, 
+                        help='Target process name to monitor (default: search for 3dsmax or max_simulator)')
     parser.add_argument('-t', '--threshold', type=float, default=0.10,
                         help='Memory spike threshold in GB to trigger warnings (default: 0.10)')
     parser.add_argument('-i', '--interval', type=float, default=0.5,
@@ -520,44 +665,93 @@ def clear_screen(full=False):
             sys.stdout.write(MOVE_CURSOR_TOP)
         sys.stdout.flush()
 
-def start_monitoring(target_script_name="max_simulator", threshold_gb=None, interval_s=None):
+def start_monitoring(target_script_name=None, threshold_gb=None, interval_s=None):
     if threshold_gb is None:
         threshold_gb = CONFIG["tier1"]["ram_spike_threshold_gb"]
     if interval_s is None:
         interval_s = CONFIG["monitoring"]["refresh_interval_seconds"]
 
+    targets = [target_script_name] if target_script_name else ['3dsmax', 'max_simulator']
+    target_display = " or ".join([f"'{t}'" for t in targets])
+
     # Clear screen initially
     clear_screen(full=True)
-    print(f"{CLEAR_LINE}{CYAN}Starting Vitals Watchdog. Searching for '{target_script_name}'...{RESET}")
+    print(f"{CLEAR_LINE}{CYAN}Starting Vitals Watchdog. Searching for {target_display}...{RESET}")
     
-    proc = None
-    tracker = MemoryTracker()
-    current_state = NORMAL
-    ls_context = {'affinity': None, 'priority': None}
-    
-    vram_monitor = VRAMMonitor()
+    active_instances = {} # pid -> dict
     
     try:
         while True:
-            if proc is None:
-                proc = vitals_core.find_process(target_script_name)
-                if proc:
+            # 1. Scan for new instances
+            current_procs = []
+            for t in targets:
+                current_procs.extend(vitals_core.find_processes(t))
+            
+            # Deduplicate by PID
+            seen_pids = set()
+            unique_procs = []
+            for p in current_procs:
+                if p.pid not in seen_pids:
+                    unique_procs.append(p)
+                    seen_pids.add(p.pid)
+
+            for proc in unique_procs:
+                if proc.pid not in active_instances:
+                    vram_monitor = VRAMMonitor()
+                    vram_monitor.set_target_pid(proc.pid)
+                    active_instances[proc.pid] = {
+                        'proc': proc,
+                        'tracker': MemoryTracker(),
+                        'state': NORMAL,
+                        'ls_context': {'affinity': None, 'priority': None},
+                        'vram_monitor': vram_monitor,
+                        'title': vitals_core.get_window_title(proc.pid),
+                        'status_msg': None
+                    }
                     clear_screen(full=True)
                     print(f"{CLEAR_LINE}{GREEN}Found process! Locking onto PID: {proc.pid}{RESET}")
-                    ls_context = {'affinity': None, 'priority': None} # Reset context for new process
-                    vram_monitor.set_target_pid(proc.pid)
-                else:
-                    clear_screen(full=True)
-                    print(f"{CLEAR_LINE}{CYAN}'{target_script_name}' not found. Waiting...{RESET}")
-                    time.sleep(1)
-                    continue
             
-            metrics = vitals_core.get_process_metrics(proc)
-            if metrics:
+            # 2. Check for closed instances
+            pids_to_remove = []
+            for pid, ctx in active_instances.items():
+                if not ctx['proc'].is_running():
+                    pids_to_remove.append(pid)
+                    ctx['vram_monitor'].stop()
+                    
+            for pid in pids_to_remove:
+                del active_instances[pid]
+                clear_screen(full=True)
+                print(f"{CLEAR_LINE}{RED_BLINK}Process {pid} lost! Removing from dashboard...{RESET}")
+            
+            if not active_instances:
+                clear_screen(full=True)
+                print(f"{CLEAR_LINE}{CYAN}{target_display} not found. Waiting...{RESET}")
+                time.sleep(1)
+                continue
+
+            system_cpu = psutil.cpu_percent(interval=None)
+            system_ram_percent = psutil.virtual_memory().percent
+            storage_metrics = vitals_core.get_storage_metrics()
+            
+            instances_data = []
+            has_critical = False
+            critical_proc = None
+            critical_ctx = None
+            
+            for pid, ctx in list(active_instances.items()):
+                proc = ctx['proc']
+                tracker = ctx['tracker']
+                ls_context = ctx['ls_context']
+                vram_monitor = ctx['vram_monitor']
+                current_state = ctx['state']
+                
+                metrics = vitals_core.get_process_metrics(proc)
+                if not metrics:
+                    continue # might have closed just now
+                
                 tracker.add_reading(metrics['memory_gb'])
                 
                 is_responding = vitals_core.is_process_responding(proc.pid)
-                system_ram_percent = psutil.virtual_memory().percent
                 state, msg = determine_state(metrics, system_ram_percent, tracker, threshold_gb=threshold_gb, is_responding=is_responding)
                 
                 # Rescue attempt on Windows if CRITICAL
@@ -575,156 +769,95 @@ def start_monitoring(target_script_name="max_simulator", threshold_gb=None, inte
 
                 # Life Support handling
                 if state == LIFE_SUPPORT:
-                    apply_life_support(proc, ls_context)
+                    apply_life_support(proc, ctx)
                 elif current_state == LIFE_SUPPORT and state != LIFE_SUPPORT:
-                    restore_life_support(proc, ls_context)
+                    restore_life_support(proc, ctx)
 
                 # Update priority if state changed
-                set_priority(proc, state, current_state)
-                current_state = state
-
-                storage_metrics = vitals_core.get_storage_metrics()
-                vram_metrics = vram_monitor.get_metrics()
-                ui_output = render_ui(metrics, storage_metrics=storage_metrics, vram_metrics=vram_metrics, state=state, warning_msg=msg)
-                clear_screen()
-                print(ui_output)
+                set_priority(proc, state, current_state, ctx)
+                ctx['state'] = state
                 
                 if state == CRITICAL:
-                    # Prompt for kill
-                    choice = None
-                    if os.name == 'nt':
-                        print(f"{CLEAR_LINE}{RED_BLINK}CRITICAL! Forcefully kill target process? [Y/N]: {RESET}", end="", flush=True)
-                        if msvcrt.kbhit():
-                            try:
-                                char = msvcrt.getch().decode('utf-8', errors='ignore').upper()
-                                if char == 'Y': choice = 'Y'
-                                elif char == 'N': choice = 'N'
-                            except (UnicodeDecodeError, AttributeError):
-                                pass
-                    else:
-                        # Fallback for non-Windows (still blocking as before)
-                        try:
-                            choice = input(f"{CLEAR_LINE}{RED_BLINK}CRITICAL! Forcefully kill target process? [Y/N]: {RESET}").strip().upper()
-                        except EOFError:
-                            print(f"{CLEAR_LINE}{RED_BLINK}Non-interactive environment detected. Cannot prompt for kill.{RESET}")
-                            time.sleep(2)
-                            tracker = MemoryTracker()
+                    has_critical = True
+                    critical_proc = proc
+                    critical_ctx = ctx
 
-                    if choice == 'Y':
-                        proc.terminate()
-                        print(f"\n{CLEAR_LINE}{GREEN}Process {proc.pid} terminated.{RESET}")
-                        proc = None
-                        tracker = MemoryTracker()
-                        ls_context = {'affinity': None, 'priority': None}
-                        time.sleep(2)
-                        continue
-                    elif choice == 'N':
-                        print(f"\n{CLEAR_LINE}{CYAN}Resuming monitoring. Spike history cleared.{RESET}")
-                        tracker = MemoryTracker()
-                else:
-                    # Ensure the line below the UI is clear when not in CRITICAL
-                    print(f"{CLEAR_LINE}", end="", flush=True)
+                vram_metrics = vram_monitor.get_metrics()
                 
-            else:
-                clear_screen(full=True)
-                print(f"{CLEAR_LINE}{RED_BLINK}Process lost! Searching again...{RESET}")
-                proc = None
-                tracker = MemoryTracker() 
-                ls_context = {'affinity': None, 'priority': None}
+                instances_data.append({
+                    'pid': pid,
+                    'title': ctx['title'],
+                    'metrics': metrics,
+                    'vram_metrics': vram_metrics,
+                    'state': state,
+                    'warning_msg': msg,
+                    'status_msg': ctx['status_msg']
+                })
+                
+            if not instances_data:
+                time.sleep(interval_s)
+                continue
+
+            ui_output = render_ui(
+                storage_metrics=storage_metrics,
+                system_cpu=system_cpu,
+                instances=instances_data
+            )
+            clear_screen()
+            print(ui_output)
             
+            if has_critical and critical_proc:
+                # Prompt for kill
+                choice = None
+                if os.name == 'nt':
+                    print(f"{CLEAR_LINE}{RED_BLINK}CRITICAL! Forcefully kill target process PID {critical_proc.pid}? [Y/N]: {RESET}", end="", flush=True)
+                    if msvcrt.kbhit():
+                        try:
+                            char = msvcrt.getch().decode('utf-8', errors='ignore').upper()
+                            if char == 'Y': choice = 'Y'
+                            elif char == 'N': choice = 'N'
+                        except (UnicodeDecodeError, AttributeError):
+                            pass
+                else:
+                    # Fallback for non-Windows (still blocking as before)
+                    try:
+                        choice = input(f"{CLEAR_LINE}{RED_BLINK}CRITICAL! Forcefully kill target process PID {critical_proc.pid}? [Y/N]: {RESET}").strip().upper()
+                    except EOFError:
+                        print(f"{CLEAR_LINE}{RED_BLINK}Non-interactive environment detected. Cannot prompt for kill.{RESET}")
+                        time.sleep(2)
+                        critical_ctx['tracker'] = MemoryTracker()
+
+                if choice == 'Y':
+                    try:
+                        critical_proc.terminate()
+                        print(f"\n{CLEAR_LINE}{GREEN}Process {critical_proc.pid} terminated.{RESET}")
+                    except (psutil.NoSuchProcess, psutil.AccessDenied):
+                        pass
+                    critical_ctx['vram_monitor'].stop()
+                    if critical_proc.pid in active_instances:
+                        del active_instances[critical_proc.pid]
+                    time.sleep(2)
+                    continue
+                elif choice == 'N':
+                    print(f"\n{CLEAR_LINE}{CYAN}Resuming monitoring. Spike history cleared for PID {critical_proc.pid}.{RESET}")
+                    critical_ctx['tracker'] = MemoryTracker()
+            else:
+                # Ensure the line below the UI is clear when not in CRITICAL
+                print(f"{CLEAR_LINE}", end="", flush=True)
+                
             time.sleep(interval_s)
     finally:
-        vram_monitor.stop()
+        for ctx in active_instances.values():
+            ctx['vram_monitor'].stop()
 
 def main():
     try:
-        if len(sys.argv) == 1:
-            target, threshold, interval = interactive_wizard()
-            if target:
-                start_monitoring(target, threshold, interval)
-        else:
-            args = parse_args()
-            start_monitoring(args.target, args.threshold, args.interval)
+        args = parse_args()
+        start_monitoring(args.target, args.threshold, args.interval)
     except KeyboardInterrupt:
         clear_screen(full=True)
         print(f"{CLEAR_LINE}[INFO] Monitoring terminated by user. Exiting...")
         sys.exit(0)
-
-
-def interactive_wizard():
-    """
-    Scans for processes containing '3dsmax' or 'max_simulator' and prompts user for configuration.
-    """
-    clear_screen(full=True)
-    print(f"{CLEAR_LINE}{CYAN}{'='*60}")
-    print(f"{CLEAR_LINE}{'V I T A L S   I N T E R A C T I V E   W I Z A R D':^60}")
-    print(f"{CLEAR_LINE}{'='*60}{RESET}\n")
-
-
-    processes = []
-    for proc in psutil.process_iter(attrs=['pid', 'name', 'cmdline']):
-        try:
-            name = (proc.info.get('name') or "").lower()
-            cmdline = proc.info.get('cmdline') or []
-            
-            # Check by process name directly first
-            if '3dsmax' in name or 'max_simulator' in name:
-                processes.append(proc.info)
-            # Check if it's a python process and if the target script is in its cmdline
-            elif 'python' in name and cmdline:
-                if any('3dsmax' in arg.lower() or 'max_simulator' in arg.lower() for arg in cmdline):
-                    # For python processes, use the script name for display if possible
-                    # We'll just use the first argument that matches
-                    for arg in cmdline:
-                        if '3dsmax' in arg.lower() or 'max_simulator' in arg.lower():
-                            proc.info['name'] = os.path.basename(arg)
-                            break
-                    processes.append(proc.info)
-        except (psutil.NoSuchProcess, psutil.AccessDenied):
-            continue
-
-    if not processes:
-        print(f"{CLEAR_LINE}{YELLOW}[!] No matching processes found (3dsmax or max_simulator).{RESET}")
-        return None, None, None
-
-    if len(processes) == 1:
-        proc = processes[0]
-        print(f"{CLEAR_LINE}{CYAN}[INFO] Only one instance found: {proc['name']} (PID: {proc['pid']}). Auto-selecting...{RESET}")
-        target_name = proc['name']
-    else:
-        print(f"{CLEAR_LINE}{GREEN}Found the following processes:{RESET}")
-        for i, proc in enumerate(processes, 1):
-            print(f"{CLEAR_LINE}  {CYAN}{i}.{RESET} {proc['name']} (PID: {proc['pid']})")
-        
-        print(f"{CLEAR_LINE}")
-        try:
-            selection = input(f"{CLEAR_LINE}{GREEN}Select process number: {RESET}").strip()
-            if not selection:
-                print(f"{CLEAR_LINE}{YELLOW}No selection made. Exiting.{RESET}")
-                return None, None, None
-            
-            idx = int(selection) - 1
-            if idx < 0 or idx >= len(processes):
-                print(f"{CLEAR_LINE}{RED_BLINK}Invalid selection.{RESET}")
-                return None, None, None
-                
-            target_name = processes[idx]['name']
-        except (ValueError, KeyboardInterrupt, EOFError):
-            print(f"{CLEAR_LINE}\n{YELLOW}Wizard cancelled or invalid input.{RESET}")
-            return None, None, None
-
-    try:
-        threshold_input = input(f"{CLEAR_LINE}{GREEN}Memory threshold (GB) [Default 0.10]: {RESET}").strip()
-        threshold = float(threshold_input) if threshold_input else 0.10
-        
-        interval_input = input(f"{CLEAR_LINE}{GREEN}Refresh interval (sec) [Default 0.5]: {RESET}").strip()
-        interval = float(interval_input) if interval_input else 0.5
-        
-        return target_name, threshold, interval
-        
-    except (ValueError, KeyboardInterrupt, EOFError):
-        print(f"{CLEAR_LINE}\n{YELLOW}Wizard cancelled or invalid input.{RESET}")
-        return None, None, None
 
 if __name__ == "__main__":
     main()

@@ -50,11 +50,11 @@ class TestVitalsUIV3(unittest.TestCase):
         
         output = vitals.render_ui(metrics, state=vitals.NORMAL)
         
-        # Verify status matrix presence and formatting
+        # Verify status matrix presence and formatting with CYAN color
         # 32 -> Normal
         # [2, 3, 4, 5] -> 4 cores out of 8
-        self.assertIn("[ PRIORITY: Normal       ]", output)
-        self.assertIn("[ CORES: 4/8   ]", output)
+        expected_matrix = f"{self.CYAN}[ PRIORITY: Normal       ] [ CORES: 4/8   ]{self.RESET}"
+        self.assertIn(expected_matrix, output)
 
     @patch('psutil.cpu_count')
     def test_render_ui_status_matrix_idle(self, mock_cpu_count):
@@ -70,8 +70,8 @@ class TestVitalsUIV3(unittest.TestCase):
         
         # 64 -> Idle
         # [0, 1] -> 2 cores out of 16
-        self.assertIn("[ PRIORITY: Idle         ]", output)
-        self.assertIn("[ CORES: 2/16  ]", output)
+        expected_matrix = f"{self.CYAN}[ PRIORITY: Idle         ] [ CORES: 2/16  ]{self.RESET}"
+        self.assertIn(expected_matrix, output)
 
 if __name__ == '__main__':
     unittest.main()

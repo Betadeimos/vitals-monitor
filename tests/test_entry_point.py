@@ -4,15 +4,12 @@ import sys
 import vitals
 
 class TestEntryPoint(unittest.TestCase):
-    @patch('vitals.interactive_wizard')
     @patch('vitals.start_monitoring')
-    def test_main_no_args_calls_wizard(self, mock_start, mock_wizard):
-        """Test that calling main with no arguments triggers the interactive wizard."""
-        mock_wizard.return_value = ("test_proc", 100, 0.5)
+    def test_main_no_args_starts_instantly(self, mock_start):
+        """Test that calling main with no arguments starts monitoring instantly."""
         with patch.object(sys, 'argv', ['vitals']):
             vitals.main()
-        mock_wizard.assert_called_once()
-        mock_start.assert_called_once_with("test_proc", 100, 0.5)
+        mock_start.assert_called_once_with(None, 0.1, 0.5)
 
     @patch('vitals.parse_args')
     @patch('vitals.start_monitoring')

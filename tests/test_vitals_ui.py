@@ -14,7 +14,81 @@ class TestVitalsUI(unittest.TestCase):
         self.CYAN = "\033[36m"
         self.GREEN = "\033[32m"
         self.YELLOW = "\033[33m"
+        self.ORANGE = "\033[38;5;208m"
+        self.RED = "\033[31m"
         self.RED_BLINK = "\033[1;5;31m"
+
+    def test_get_usage_color(self):
+        from vitals import get_usage_color
+        self.assertEqual(get_usage_color(0), self.GREEN)
+        self.assertEqual(get_usage_color(50), self.GREEN)
+        self.assertEqual(get_usage_color(51), self.YELLOW)
+        self.assertEqual(get_usage_color(75), self.YELLOW)
+        self.assertEqual(get_usage_color(76), self.ORANGE)
+        self.assertEqual(get_usage_color(90), self.ORANGE)
+        self.assertEqual(get_usage_color(91), self.RED_BLINK)
+
+    def test_draw_shared_vram_bar(self):
+        from vitals import draw_shared_vram_bar
+        # 0 GB -> GREEN label
+        output_0 = draw_shared_vram_bar(0.0)
+        self.assertIn(self.GREEN + "SHARED GPU", output_0)
+        self.assertIn(self.GREEN + "-" * 40, output_0)
+        
+        # > 0 GB -> RED label
+        output_1 = draw_shared_vram_bar(0.5)
+        self.assertIn(self.RED + "SHARED GPU", output_1)
+        # 0.5 GB should show 1 block (int(0.5 * 2) = 1)
+        self.assertIn(self.RED + "■" + "-" * 39, output_1)
+
+    def test_dynamic_label_colors(self):
+        from vitals import draw_bar, draw_stacked_ram_bar, draw_stacked_cpu_bar, draw_stacked_vram_bar
+        # CPU 95% -> RED_BLINK label
+        with patch('psutil.cpu_percent', return_value=95.0):
+            output = draw_stacked_cpu_bar(10.0)
+            self.assertIn(self.RED_BLINK + "CPU", output)
+            
+        # RAM 60% -> YELLOW label
+        with patch('psutil.virtual_memory') as mock_vm:
+            mock_vm.return_value.total = 100
+            mock_vm.return_value.used = 60
+            output = draw_stacked_ram_bar(10.0)
+            self.assertIn(self.YELLOW + "RAM", output)
+            
+        # DISK 80% -> ORANGE label
+        output = draw_bar("DISK C", 80, 100)
+        self.assertIn(self.ORANGE + "DISK C", output)
+
+    def test_render_ui_cyan_borders(self):
+        from vitals import NORMAL
+        metrics = {'cpu_percent': 10.0, 'memory_gb': 1.0}
+        output = render_ui(metrics, state=NORMAL)
+        # Every line should have CYAN | or CYAN +
+        lines = output.split('\n')
+        found_cyan = False
+        for line in lines:
+            if not line.strip(): continue
+            if self.CYAN in line:
+                found_cyan = True
+            if '|' in line:
+                self.assertIn(self.CYAN + "|", line)
+            if '+' in line:
+                self.assertIn(self.CYAN + "+", line)
+        self.assertTrue(found_cyan)
+
+    def test_render_ui_shared_gpu_line(self):
+        from vitals import NORMAL
+        metrics = {'cpu_percent': 10.0, 'memory_gb': 1.0}
+        vram_metrics = {
+            'used_gb': 2.0,
+            'total_gb': 8.0,
+            'shared_used_gb': 0.5
+        }
+        output = render_ui(metrics, vram_metrics=vram_metrics, state=NORMAL)
+        self.assertIn("SHARED GPU", output)
+        self.assertIn("0.50 GB", output)
+        self.assertIn("!!! WARNING: SHARED GPU MEMORY SPILLAGE !!!", output)
+        self.assertIn(self.RED_BLINK, output)
 
     @patch('os.system')
     @patch('sys.stdout.write')
@@ -71,7 +145,7 @@ class TestVitalsUI(unittest.TestCase):
         self.assertIn(self.CYAN, output)
         self.assertIn("=" * 60, output)
         # Check for normal status
-        self.assertIn(self.GREEN + "Status: Normal", output)
+        self.assertIn("[ STATUS: MONITORING ACTIVE ]", output)
         # Should not have spike warning
         self.assertNotIn("!!! CRITICAL: RUNAWAY MEMORY LEAK !!!", output)
 
@@ -161,12 +235,12 @@ class TestVitalsUI(unittest.TestCase):
         for line in bar_lines:
             plain_line = self.strip_ansi(line)
             # Find the bracket that starts the bar.
-            # It should be at index 13 because label is 12 chars + 1 space.
-            idx = 13
+            # It should be at index 15 because border is 2 chars, label is 12 chars + 1 space.
+            idx = 15
             self.assertEqual(plain_line[idx], '[', f"Line '{plain_line}' does not have '[' at index {idx}")
             
             # Verify the label part is 12 chars
-            label_part = plain_line[:12]
+            label_part = plain_line[2:14]
             self.assertEqual(len(label_part), 12, f"Label part '{label_part}' is not 12 chars")
 
     def test_simplified_borders(self):
@@ -180,8 +254,22 @@ class TestVitalsUI(unittest.TestCase):
         top_border = plain_lines[0]
         bottom_border = plain_lines[-1]
         
-        self.assertTrue(all(c == '=' for c in top_border), f"Top border is not simplified: {top_border}")
-        self.assertTrue(all(c == '=' for c in bottom_border), f"Bottom border is not simplified: {bottom_border}")
+        self.assertTrue(all(c == '=' for c in top_border[1:-1]), f"Top border is not simplified: {top_border}")
+        self.assertTrue(all(c == '=' for c in bottom_border[1:-1]), f"Bottom border is not simplified: {bottom_border}")
+
+    def test_status_matrix_color(self):
+        from vitals import NORMAL
+        metrics = {
+            'priority': 32, 
+            'cpu_affinity': [0, 1], 
+            'cpu_percent': 10.0, 
+            'memory_gb': 1.0
+        }
+        with patch('psutil.cpu_count', return_value=8):
+            output = render_ui(metrics, state=NORMAL)
+            # 32 -> Normal, 2 cores out of 8 -> 2/8
+            expected_matrix = f"{self.CYAN}[ PRIORITY: Normal       ] [ CORES: 2/8   ]{self.RESET}"
+            self.assertIn(expected_matrix, output)
 
     def test_status_matrix_fixed_width(self):
         from vitals import NORMAL
@@ -264,19 +352,85 @@ class TestVitalsUI(unittest.TestCase):
         self.assertIn(f"{GREEN}{'■' * 4}{RESET}", output)
         self.assertIn('-' * 24, output)
         self.assertIn("40.0%", output)
+        self.assertIn("VRAM [GPU]", output)
 
     def test_draw_stacked_vram_bar_fallback(self):
-        from vitals import draw_stacked_vram_bar, GREEN, RESET
+        from vitals import draw_stacked_vram_bar, WHITE, RESET
         vram_metrics = {
             'used_gb': 4.0,
             'total_gb': 10.0,
             'process_vram_gb': None
         }
         output = draw_stacked_vram_bar(vram_metrics)
-        # Should use draw_bar: [■■■■■■■■■■■■■■■■------------------------] 40.0%
-        # Note: draw_bar puts RESET after the full bar (boxes + dashes)
-        self.assertIn(f"{GREEN}{'■' * 16}{'-' * 24}{RESET}", output)
+        # Should treat None as 0.0 process VRAM
+        # Total 40%, Target 0%, Other 40%
+        # Bar length 40: Other 16 chars, Target 0 chars, Free 24 chars
+        self.assertIn(f"{WHITE}{'■' * 16}{RESET}", output)
+        self.assertIn('-' * 24, output)
         self.assertIn("40.0%", output)
+
+    def test_render_ui_vram_spillage_warning(self):
+        from vitals import NORMAL, RED_BLINK, RESET
+        metrics = {'cpu_percent': 10.0, 'memory_gb': 1.0}
+        # 95% usage + 0.5 GB shared
+        vram_metrics = {
+            'used_gb': 9.5,
+            'total_gb': 10.0,
+            'process_vram_gb': 2.0,
+            'shared_used_gb': 0.5
+        }
+        output = render_ui(metrics, vram_metrics=vram_metrics, state=NORMAL)
+        
+        # Check for spillage warning in RED_BLINK
+        expected_warning = f"{RED_BLINK}!!! WARNING: SHARED GPU MEMORY SPILLAGE !!!{RESET}"
+        self.assertIn(expected_warning, output)
+
+    def test_global_metrics_section(self):
+        from vitals import NORMAL
+        metrics = {'cpu_percent': 10.0, 'memory_gb': 1.0}
+        storage_metrics = {'C': {'utilization_percent': 20.0}}
+        output = render_ui(metrics, storage_metrics=storage_metrics, state=NORMAL)
+        
+        # Should have GLOBAL SYSTEM METRICS header
+        self.assertIn("GLOBAL SYSTEM METRICS", output)
+        
+        # DISK C should be present
+        self.assertIn("DISK C", output)
+        
+        # Instance header should be AFTER global metrics
+        global_idx = output.find("GLOBAL SYSTEM METRICS")
+        disk_idx = output.find("DISK C")
+        inst_idx = output.find("INSTANCE") # In render_ui, it's added if pid is not None
+        
+        # For this test, pid is None, so let's use another marker like CPU bar
+        cpu_idx = output.find("CPU")
+        
+        self.assertTrue(global_idx < disk_idx < cpu_idx, f"Ordering failed: Global({global_idx}) < Disk({disk_idx}) < CPU({cpu_idx})")
+
+    def test_render_ui_instance_symmetry(self):
+        from vitals import NORMAL
+        instances = [
+            {'pid': 123, 'title': 'App 1', 'metrics': {'cpu_percent': 10.0, 'memory_gb': 1.0}, 'state': NORMAL},
+            {'pid': 456, 'title': 'App 2', 'metrics': {'cpu_percent': 20.0, 'memory_gb': 2.0}, 'state': NORMAL}
+        ]
+        storage_metrics = {'C': {'utilization_percent': 20.0}}
+        output = render_ui(storage_metrics=storage_metrics, instances=instances)
+        
+        # Count occurrences of "DISK C" - should be 1
+        self.assertEqual(output.count("DISK C"), 1)
+        # Count occurrences of "CPU" - should be 2
+        self.assertEqual(output.count("CPU"), 2)
+
+    def test_ui_width_80(self):
+        from vitals import NORMAL
+        metrics = {'cpu_percent': 10.0, 'memory_gb': 1.0}
+        storage_metrics = {'C': {'utilization_percent': 20.0}}
+        output = render_ui(metrics, storage_metrics=storage_metrics, state=NORMAL)
+        
+        for line in output.split('\n'):
+            plain_line = self.strip_ansi(line)
+            if plain_line:
+                self.assertEqual(len(plain_line), 80, f"Line width is not 80: '{plain_line}' (len={len(plain_line)})")
 
 if __name__ == '__main__':
     unittest.main()

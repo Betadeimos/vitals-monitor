@@ -103,28 +103,47 @@ def is_process_responding(pid):
 def get_main_window_handle(pid):
     """
     Finds the main window handle (HWND) for a given process PID on Windows.
+    Prioritizes windows with titles containing "3ds Max".
     Returns None if not found or not on Windows.
     """
     if os.name != 'nt' or ctypes is None:
         return None
     
     try:
-        found_hwnd = [None]
+        handles = []
         WNDENUMPROC = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_int, ctypes.c_void_p)
         
         def enum_handler(hwnd, lparam):
             lp_pid = ctypes.c_ulong()
             ctypes.windll.user32.GetWindowThreadProcessId(hwnd, ctypes.byref(lp_pid))
             if lp_pid.value == pid:
-                # We prioritize visible windows as the "main" window
+                # We prioritize visible windows
                 if ctypes.windll.user32.IsWindowVisible(hwnd):
-                    found_hwnd[0] = hwnd
-                    return False  # Stop enumerating
+                    handles.append(hwnd)
             return True
 
         cb_handler = WNDENUMPROC(enum_handler)
         ctypes.windll.user32.EnumWindows(cb_handler, 0)
-        return found_hwnd[0]
+        
+        if not handles:
+            return None
+
+        # Prioritize 3ds Max titles
+        max_handles = []
+        for h in handles:
+            length = ctypes.windll.user32.GetWindowTextLengthW(h)
+            if length > 0:
+                buff = ctypes.create_unicode_buffer(length + 1)
+                ctypes.windll.user32.GetWindowTextW(h, buff, length + 1)
+                title = buff.value
+                if "3ds max" in title.lower():
+                    max_handles.append((h, len(title)))
+        
+        if max_handles:
+            # Pick the one with the longest title (usually scene path)
+            return max(max_handles, key=lambda x: x[1])[0]
+
+        return handles[0] # Fallback to first visible
     except Exception:
         return None
 
@@ -148,38 +167,101 @@ def attempt_rescue(pid):
             pass
     return False
 
+def get_window_title(pid):
+    """
+    Returns the window title of the main window for a given PID on Windows.
+    """
+    if os.name != 'nt' or ctypes is None:
+        return None
+    
+    hwnd = get_main_window_handle(pid)
+    if hwnd:
+        try:
+            length = ctypes.windll.user32.GetWindowTextLengthW(hwnd)
+            if length > 0:
+                buff = ctypes.create_unicode_buffer(length + 1)
+                ctypes.windll.user32.GetWindowTextW(hwnd, buff, length + 1)
+                return buff.value
+        except Exception:
+            pass
+    return None
+
+def clean_title(title, max_length=40):
+    """
+    Strips common 3ds Max suffixes and truncates the title to max_length.
+    Appends an ellipsis if truncated.
+    """
+    if not title:
+        return ""
+    
+    # Strip common suffixes
+    suffixes = [" - Autodesk 3ds Max 2024", " - Autodesk 3ds Max 2023", " - Autodesk 3ds Max 2022", " - 3ds Max"]
+    cleaned = title
+    for suffix in suffixes:
+        if cleaned.endswith(suffix):
+            cleaned = cleaned[:-len(suffix)]
+            break
+            
+    if len(cleaned) > max_length:
+        # Truncate to max_length - 3 to fit the ellipsis
+        cleaned = cleaned[:max_length-3] + "..."
+        
+    return cleaned
+
 def find_process(target_script_name):
     """
     Scans running processes to find one that matches the target script name.
     """
     for proc in psutil.process_iter(attrs=['pid', 'name', 'cmdline']):
         try:
-            name = proc.info.get('name') or ""
+            name = (proc.info.get('name') or "").lower()
             cmdline = proc.info.get('cmdline') or []
 
             # Check by process name directly first
-            if target_script_name.lower() in name.lower():
+            if target_script_name.lower() in name:
                 return proc
 
             # Check if it's a python process and if the target script is in its cmdline
-            if 'python' in name.lower():
-                if any(target_script_name in arg for arg in cmdline):
+            if 'python' in name:
+                if any(target_script_name.lower() in arg.lower() for arg in cmdline):
                     return proc
         except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
             continue
     return None
+
+def find_processes(target_script_name):
+    """
+    Scans running processes to find all that match the target script name.
+    """
+    found = []
+    for proc in psutil.process_iter(attrs=['pid', 'name', 'cmdline']):
+        try:
+            name = (proc.info.get('name') or "").lower()
+            cmdline = proc.info.get('cmdline') or []
+
+            if target_script_name.lower() in name:
+                found.append(proc)
+                continue
+
+            if 'python' in name:
+                if any(target_script_name.lower() in arg.lower() for arg in cmdline):
+                    found.append(proc)
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+            continue
+    return found
+
 def get_process_metrics(proc):
     """
     Retrieves CPU and RAM usage for a given process.
+    Returns metrics normalized to 0-100% scale for CPU.
     """
     try:
-        # psutil.cpu_percent needs to be called twice or with an interval to get a reading, 
-        # but here it's called repeatedly in the loop. 
-        # For the first call, it might return 0.0.
-        cpu_percent = proc.cpu_percent(interval=None) 
-        # Normalize CPU by dividing by number of cores
+        # On Windows, proc.cpu_percent() returns usage since last call, 
+        # but it can be > 100.0 if multi-core usage is high.
+        # We divide by cpu_count to normalize to a 0-100% system-wide scale.
+        cpu_raw = proc.cpu_percent(interval=None)
         count = psutil.cpu_count() or 1
-        cpu_percent = cpu_percent / count
+        cpu_normalized = cpu_raw / count
         
         memory_info = proc.memory_info()
         memory_gb = memory_info.rss / (1024 * 1024 * 1024)
@@ -189,7 +271,7 @@ def get_process_metrics(proc):
         cpu_affinity = proc.cpu_affinity()
         
         return {
-            'cpu_percent': round(cpu_percent, 2),
+            'cpu_percent': round(cpu_normalized, 2),
             'memory_gb': round(memory_gb, 2),
             'priority': priority,
             'cpu_affinity': cpu_affinity
@@ -266,8 +348,13 @@ def get_storage_metrics():
             c1, c2 = io1[io_key], io2[io_key]
             
             # 1. Try time-based (busy_time is best, read+write time is fallback)
-            b1 = getattr(c1, 'busy_time', c1.read_time + c1.write_time)
-            b2 = getattr(c2, 'busy_time', c2.read_time + c2.write_time)
+            # Use getattr with a default and check if the result is a number to be robust against mocks
+            b1 = getattr(c1, 'busy_time', None)
+            if not isinstance(b1, (int, float)): b1 = c1.read_time + c1.write_time
+            
+            b2 = getattr(c2, 'busy_time', None)
+            if not isinstance(b2, (int, float)): b2 = c2.read_time + c2.write_time
+            
             dbusy_ms = b2 - b1
             util = (dbusy_ms / (dt_s * 1000)) * 100
             
@@ -287,48 +374,101 @@ def get_storage_metrics():
 def get_vram_metrics(pid=None):
     """
     Execute nvidia-smi --query-gpu=memory.used,memory.total --format=csv,noheader,nounits.
+    Sums across all GPUs if multiple are present.
     If pid is provided, also try to fetch vram usage for that specific process.
     """
     try:
-        # Get total GPU memory
+        # Get total GPU memory (all GPUs)
         output = subprocess.check_output(
             ["nvidia-smi", "--query-gpu=memory.used,memory.total", "--format=csv,noheader,nounits"],
             stderr=subprocess.STDOUT
         ).decode('utf-8').strip()
         
-        parts = output.split(',')
-        if len(parts) == 2:
-            used_mb, total_mb = map(float, parts)
-            metrics = {
-                'used_gb': round(used_mb / 1024, 1),
-                'total_gb': round(total_mb / 1024, 1),
-                'process_vram_gb': 0.0
-            }
+        total_used_mb = 0.0
+        total_max_mb = 0.0
+        
+        lines = output.split('\n')
+        for line in lines:
+            if not line.strip(): continue
+            parts = line.split(',')
+            if len(parts) == 2:
+                total_used_mb += float(parts[0].strip())
+                total_max_mb += float(parts[1].strip())
+        
+        if total_max_mb <= 0:
+            return None
 
-            if pid:
-                try:
-                    # Get VRAM usage per PID
-                    apps_output = subprocess.check_output(
-                        ["nvidia-smi", "--query-compute-apps=pid,used_memory", "--format=csv,noheader,nounits"],
-                        stderr=subprocess.STDOUT
-                    ).decode('utf-8').strip()
+        metrics = {
+            'used_gb': round(total_used_mb / 1024, 1),
+            'total_gb': round(total_max_mb / 1024, 1),
+            'process_vram_gb': 0.0,
+            'shared_used_gb': 0.0
+        }
+
+        # Shared GPU Memory (Windows fallback)
+        if os.name == 'nt':
+            try:
+                # Use typeperf to get Shared Usage across all GPUs
+                # creationflags=0x08000000 is CREATE_NO_WINDOW
+                cmd = ['typeperf', '-sc', '1', '\\GPU Adapter Memory(*)\\Shared Usage']
+                res = subprocess.check_output(cmd, stderr=subprocess.DEVNULL, creationflags=0x08000000).decode('utf-8', errors='ignore')
+                res_lines = [line.strip() for line in res.split('\n') if line.strip()]
+                
+                # typeperf output usually:
+                # [0] "(PDH-CSV 4.0)","\\...","..." (Header)
+                # [1] "04/22/2026 14:54:43.223","9389805568.000000",... (Data)
+                # [2] Exiting, please wait...
+                
+                if len(res_lines) >= 2:
+                    # Look for the line that starts with a quoted timestamp
+                    data_line = None
+                    for line in res_lines:
+                        if line.startswith('"') and ',' in line and any(c.isdigit() for c in line[:20]):
+                            data_line = line
+                            break
                     
-                    for line in apps_output.split('\n'):
-                        if not line.strip(): continue
-                        app_pid_parts = line.split(',')
-                        if len(app_pid_parts) == 2:
-                            app_pid_str, app_vram_str = app_pid_parts
-                            if int(app_pid_str.strip()) == pid:
-                                metrics['process_vram_gb'] = round(float(app_vram_str.strip()) / 1024, 2)
-                                break
-                except Exception:
-                    # If we can't get PID-specific info, fallback to None for process_vram
-                    metrics['process_vram_gb'] = None
+                    if data_line:
+                        vals = data_line.split(',')
+                        total_shared_bytes = 0.0
+                        # Skip the timestamp (first column)
+                        for v in vals[1:]:
+                            try:
+                                v_clean = v.strip('"')
+                                if v_clean:
+                                    total_shared_bytes += float(v_clean)
+                            except (ValueError, IndexError):
+                                continue
+                        metrics['shared_used_gb'] = round(total_shared_bytes / (1024**3), 2)
+            except Exception:
+                pass
 
-            return metrics
+        if pid:
+            try:
+                # Get VRAM usage per PID
+                apps_output = subprocess.check_output(
+                    ["nvidia-smi", "--query-compute-apps=pid,used_memory", "--format=csv,noheader,nounits"],
+                    stderr=subprocess.STDOUT
+                ).decode('utf-8').strip()
+                
+                process_used_mb = 0.0
+                for line in apps_output.split('\n'):
+                    if not line.strip(): continue
+                    app_pid_parts = line.split(',')
+                    if len(app_pid_parts) == 2:
+                        app_pid_str, app_vram_str = app_pid_parts
+                        if int(app_pid_str.strip()) == pid:
+                            # A process can use memory on multiple GPUs
+                            process_used_mb += float(app_vram_str.strip())
+                
+                metrics['process_vram_gb'] = round(process_used_mb / 1024, 2)
+            except Exception:
+                # If we can't get PID-specific info, fallback to 0.0 or None
+                # We already initialized to 0.0, which is safer for the stacked bar
+                pass
+
+        return metrics
     except (subprocess.CalledProcessError, FileNotFoundError, ValueError):
         return None
-    return None
 
 def monitor(target_script_name):
     """

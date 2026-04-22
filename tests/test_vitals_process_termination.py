@@ -12,7 +12,7 @@ class TestVitalsProcessTermination(unittest.TestCase):
     @patch('vitals.os.name', 'nt')
     @patch('vitals.msvcrt', create=True)
     @patch('vitals.psutil.virtual_memory')
-    @patch('vitals.vitals_core.find_process')
+    @patch('vitals.vitals_core.find_processes')
     @patch('vitals.vitals_core.get_process_metrics')
     @patch('vitals.time.sleep')
     @patch('vitals.clear_screen')
@@ -23,7 +23,8 @@ class TestVitalsProcessTermination(unittest.TestCase):
         mock_vm.return_value.used = 15 * (1024 ** 3)
         mock_proc = MagicMock()
         mock_proc.pid = 1234
-        mock_find.return_value = mock_proc
+        mock_proc.is_running.return_value = True
+        mock_find.return_value = [mock_proc]
         
         mock_metrics.return_value = {'cpu_percent': 10, 'memory_gb': 0.4}
         
@@ -45,7 +46,7 @@ class TestVitalsProcessTermination(unittest.TestCase):
     @patch('vitals.os.name', 'nt')
     @patch('vitals.msvcrt', create=True)
     @patch('vitals.psutil.virtual_memory')
-    @patch('vitals.vitals_core.find_process')
+    @patch('vitals.vitals_core.find_processes')
     @patch('vitals.vitals_core.get_process_metrics')
     @patch('vitals.time.sleep')
     @patch('vitals.clear_screen')
@@ -56,7 +57,8 @@ class TestVitalsProcessTermination(unittest.TestCase):
         mock_vm.return_value.used = 15 * (1024 ** 3)
         mock_proc = MagicMock()
         mock_proc.pid = 1234
-        mock_find.return_value = mock_proc
+        mock_proc.is_running.return_value = True
+        mock_find.return_value = [mock_proc]
         
         mock_metrics.return_value = {'cpu_percent': 10, 'memory_gb': 0.4}
         
@@ -78,7 +80,7 @@ class TestVitalsProcessTermination(unittest.TestCase):
     @patch('vitals.os.name', 'posix')
     @patch('vitals.input')
     @patch('vitals.psutil.virtual_memory')
-    @patch('vitals.vitals_core.find_process')
+    @patch('vitals.vitals_core.find_processes')
     @patch('vitals.vitals_core.get_process_metrics')
     @patch('vitals.time.sleep')
     @patch('vitals.clear_screen')
@@ -89,7 +91,8 @@ class TestVitalsProcessTermination(unittest.TestCase):
         mock_vm.return_value.used = 15 * (1024 ** 3)
         mock_proc = MagicMock()
         mock_proc.pid = 1234
-        mock_find.return_value = mock_proc
+        mock_proc.is_running.return_value = True
+        mock_find.return_value = [mock_proc]
         
         mock_metrics.return_value = {'cpu_percent': 10, 'memory_gb': 0.4}
         

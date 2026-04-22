@@ -31,14 +31,14 @@ class TestVitalsLifeSupport(unittest.TestCase):
         self.mock_proc.cpu_affinity.return_value = original_affinity
         self.mock_proc.nice.return_value = original_priority
         
-        saved_context = {'affinity': None, 'priority': None}
-        
-        with patch('vitals.print'):
-            vitals.apply_life_support(self.mock_proc, saved_context)
-        
-        # Verify original values were saved
-        self.assertEqual(saved_context['affinity'], original_affinity)
-        self.assertEqual(saved_context['priority'], original_priority)
+        ctx = {'ls_context': {'affinity': None, 'priority': None}, 'status_msg': None}
+
+        vitals.apply_life_support(self.mock_proc, ctx)
+
+        # Verify context is updated
+        self.assertEqual(ctx['ls_context']['affinity'], original_affinity)
+        self.assertEqual(ctx['ls_context']['priority'], original_priority)
+        self.assertEqual(ctx['status_msg'], "[LIFE SUPPORT] Throttling cores & priority...")
         
         # Verify new values were set
         # Cores 0 and 1 removed from [0..7] -> [2, 3, 4, 5, 6, 7]
@@ -54,21 +54,24 @@ class TestVitalsLifeSupport(unittest.TestCase):
         original_affinity = [0, 1, 2, 3, 4, 5, 6, 7]
         original_priority = psutil.NORMAL_PRIORITY_CLASS
         
-        saved_context = {
-            'affinity': original_affinity,
-            'priority': original_priority
+        ctx = {
+            'ls_context': {
+                'affinity': original_affinity,
+                'priority': original_priority
+            },
+            'status_msg': None
         }
         
-        with patch('vitals.print'):
-            vitals.restore_life_support(self.mock_proc, saved_context)
+        vitals.restore_life_support(self.mock_proc, ctx)
         
         # Verify values were restored
         self.mock_proc.cpu_affinity.assert_called_with(original_affinity)
         self.mock_proc.nice.assert_called_with(original_priority)
         
         # Verify context was cleared
-        self.assertIsNone(saved_context['affinity'])
-        self.assertIsNone(saved_context['priority'])
+        self.assertIsNone(ctx['ls_context']['affinity'])
+        self.assertIsNone(ctx['ls_context']['priority'])
+        self.assertEqual(ctx['status_msg'], "[LIFE SUPPORT] Restoring original affinity & priority.")
 
     @patch('os.name', 'nt')
     @patch('psutil.cpu_count', return_value=2)
@@ -82,17 +85,10 @@ class TestVitalsLifeSupport(unittest.TestCase):
         self.mock_proc.cpu_affinity.return_value = original_affinity
         self.mock_proc.nice.return_value = original_priority
         
-        saved_context = {'affinity': None, 'priority': None}
+        ctx = {'ls_context': {'affinity': None, 'priority': None}, 'status_msg': None}
         
-        with patch('vitals.print'):
-            vitals.apply_life_support(self.mock_proc, saved_context)
+        vitals.apply_life_support(self.mock_proc, ctx)
             
-        # If only [0, 1] available, and we strip [0, 1], we must keep at least one.
-        # Let's assume the logic keeps the last remaining or core 0 if all stripped.
-        # Actually, let's see how I implement it. If I use a list comprehension:
-        # [c for c in all_cores if c not in [0, 1]]
-        # If it's empty, I'll fallback to [0] or something.
-        
         self.mock_proc.cpu_affinity.assert_called()
         call_args = self.mock_proc.cpu_affinity.call_args[0][0]
         self.assertTrue(len(call_args) > 0, "Should never set an empty affinity list")
@@ -102,9 +98,8 @@ class TestVitalsLifeSupport(unittest.TestCase):
     def test_apply_life_support_1_core(self, mock_cpu_count):
         """Verify that 1 core machine doesn't crash and keeps core 0."""
         self.mock_proc.cpu_affinity.return_value = [0]
-        saved_context = {'affinity': None, 'priority': None}
-        with patch('vitals.print'):
-            vitals.apply_life_support(self.mock_proc, saved_context)
+        ctx = {'ls_context': {'affinity': None, 'priority': None}, 'status_msg': None}
+        vitals.apply_life_support(self.mock_proc, ctx)
         self.mock_proc.cpu_affinity.assert_called_with([0])
 
     @patch('os.name', 'nt')
@@ -112,9 +107,8 @@ class TestVitalsLifeSupport(unittest.TestCase):
     def test_apply_life_support_2_cores(self, mock_cpu_count):
         """Verify that 2 core machine leaves core 0 for system."""
         self.mock_proc.cpu_affinity.return_value = [0, 1]
-        saved_context = {'affinity': None, 'priority': None}
-        with patch('vitals.print'):
-            vitals.apply_life_support(self.mock_proc, saved_context)
+        ctx = {'ls_context': {'affinity': None, 'priority': None}, 'status_msg': None}
+        vitals.apply_life_support(self.mock_proc, ctx)
         self.mock_proc.cpu_affinity.assert_called_with([1])
 
     @patch('os.name', 'nt')
@@ -122,16 +116,16 @@ class TestVitalsLifeSupport(unittest.TestCase):
     def test_apply_life_support_4_cores(self, mock_cpu_count):
         """Verify that 4 core machine leaves cores 0 and 1 for system."""
         self.mock_proc.cpu_affinity.return_value = [0, 1, 2, 3]
-        saved_context = {'affinity': None, 'priority': None}
-        with patch('vitals.print'):
-            vitals.apply_life_support(self.mock_proc, saved_context)
+        ctx = {'ls_context': {'affinity': None, 'priority': None}, 'status_msg': None}
+        vitals.apply_life_support(self.mock_proc, ctx)
         self.mock_proc.cpu_affinity.assert_called_with([2, 3])
 
     @patch('vitals.vitals_core.is_process_responding')
     @patch('vitals.vitals_core.get_process_metrics')
     @patch('vitals.apply_life_support')
     @patch('vitals.restore_life_support')
-    def test_life_support_stability(self, mock_restore, mock_apply, mock_metrics, mock_responding):
+    @patch('vitals.set_priority')
+    def test_life_support_stability(self, mock_priority, mock_restore, mock_apply, mock_metrics, mock_responding):
         """
         Verify that Life Support is stable and restore is only called on transition out.
         """
@@ -151,7 +145,9 @@ class TestVitalsLifeSupport(unittest.TestCase):
 
         # We need to mock psutil.virtual_memory().percent
         with patch('psutil.virtual_memory') as mock_vm, \
-             patch('vitals.vitals_core.find_process', return_value=self.mock_proc), \
+             patch('vitals.vitals_core.find_processes', return_value=[self.mock_proc]), \
+             patch('vitals.vitals_core.get_storage_metrics', return_value={}), \
+             patch('vitals.VRAMMonitor'), \
              patch('vitals.render_ui'), \
              patch('vitals.clear_screen'), \
              patch('vitals.print'), \
@@ -179,15 +175,10 @@ class TestVitalsLifeSupport(unittest.TestCase):
         # First call to cpu_affinity (getter) succeeds, second call (setter) fails
         self.mock_proc.cpu_affinity.side_effect = [[0, 1, 2, 3], psutil.AccessDenied()]
         
-        saved_context = {'affinity': None, 'priority': None}
+        ctx = {'ls_context': {'affinity': None, 'priority': None}, 'status_msg': None}
         
-        # Should not raise exception and should print the error message
-        with patch('vitals.print') as mock_print:
-            vitals.apply_life_support(self.mock_proc, saved_context)
-            
-            # Check if the error message was printed
-            error_printed = any("[ERROR] Administrator privileges required for CPU affinity throttling." in str(call) for call in mock_print.call_args_list)
-            self.assertTrue(error_printed)
+        vitals.apply_life_support(self.mock_proc, ctx)
+        self.assertEqual(ctx['status_msg'], "[ERROR] Admin privileges required for affinity throttling.")
 
     def test_restore_life_support_handles_access_denied(self):
         """
@@ -195,14 +186,10 @@ class TestVitalsLifeSupport(unittest.TestCase):
         """
         self.mock_proc.cpu_affinity.side_effect = psutil.AccessDenied()
         
-        saved_context = {'affinity': [0, 1], 'priority': 32}
+        ctx = {'ls_context': {'affinity': [0, 1], 'priority': 32}, 'status_msg': None}
         
-        with patch('vitals.print') as mock_print:
-            vitals.restore_life_support(self.mock_proc, saved_context)
-            
-            # Check if the error message was printed
-            error_printed = any("[ERROR] Administrator privileges required for CPU affinity throttling." in str(call) for call in mock_print.call_args_list)
-            self.assertTrue(error_printed)
+        vitals.restore_life_support(self.mock_proc, ctx)
+        self.assertEqual(ctx['status_msg'], "[ERROR] Admin privileges required for affinity restoration.")
 
 if __name__ == '__main__':
     unittest.main()

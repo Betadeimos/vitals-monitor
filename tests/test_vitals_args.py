@@ -12,7 +12,7 @@ class TestVitalsArgs(unittest.TestCase):
     def test_default_args(self):
         with patch.object(sys, 'argv', ['vitals.py']):
             args = parse_args()
-            self.assertEqual(args.target, 'max_simulator')
+            self.assertIsNone(args.target)
             self.assertEqual(args.threshold, 0.1)
             self.assertEqual(args.interval, 0.5)
 

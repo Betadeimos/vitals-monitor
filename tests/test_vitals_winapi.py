@@ -161,6 +161,7 @@ class TestVitalsWinAPI(unittest.TestCase):
         
         mock_user32.EnumWindows.side_effect = side_effect_enum
         mock_user32.IsWindowVisible.return_value = True
+        mock_user32.GetWindowTextLengthW.return_value = 0 # Fallback logic
         
         hwnd = vitals_core.get_main_window_handle(1234)
         self.assertEqual(hwnd, 100)
