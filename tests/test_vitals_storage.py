@@ -11,33 +11,37 @@ import vitals_core
 
 class TestVitalsStorage(unittest.TestCase):
 
-    @patch('psutil.disk_usage')
-    def test_get_storage_metrics(self, mock_disk_usage):
-        # Mock disk usage for C: and D:
-        # psutil.disk_usage returns a namedtuple (total, used, free, percent)
-        mock_c = MagicMock()
-        mock_c.total = 500 * (1024 ** 3)
-        mock_c.used = 250 * (1024 ** 3)
+    @patch('psutil.disk_io_counters')
+    @patch('time.time')
+    def test_get_storage_metrics(self, mock_time, mock_io_counters):
+        # Reset global state for test
+        vitals_core._last_disk_io = {}
+        vitals_core._last_disk_time = 0
+
+        # First call (baseline)
+        mock_time.return_value = 1000.0
+        mock_io_0 = {
+            'C:': MagicMock(read_time=100, write_time=50),
+            'D:': MagicMock(read_time=200, write_time=100)
+        }
+        mock_io_counters.return_value = mock_io_0
         
-        mock_d = MagicMock()
-        mock_d.total = 1000 * (1024 ** 3)
-        mock_d.used = 100 * (1024 ** 3)
+        metrics_1 = vitals_core.get_storage_metrics()
+        self.assertIn('C', metrics_1)
+        self.assertEqual(metrics_1['C']['utilization_percent'], 0.0)
+
+        # Second call (1 second later)
+        mock_time.return_value = 1001.0 # delta = 1000ms
+        mock_io_1 = {
+            'C:': MagicMock(read_time=200, write_time=150), # delta busy = (200-100) + (150-50) = 200ms
+            'D:': MagicMock(read_time=300, write_time=200)  # delta busy = (300-200) + (200-100) = 200ms
+        }
+        mock_io_counters.return_value = mock_io_1
         
-        def side_effect(path):
-            if path == 'C:':
-                return mock_c
-            if path == 'D:':
-                return mock_d
-            raise FileNotFoundError()
-            
-        mock_disk_usage.side_effect = side_effect
-        
-        metrics = vitals_core.get_storage_metrics()
-        
-        self.assertEqual(metrics['C']['used_gb'], 250.0)
-        self.assertEqual(metrics['C']['total_gb'], 500.0)
-        self.assertEqual(metrics['D']['used_gb'], 100.0)
-        self.assertEqual(metrics['D']['total_gb'], 1000.0)
+        metrics_2 = vitals_core.get_storage_metrics()
+        # utilization = (200 / 1000) * 100 = 20.0%
+        self.assertEqual(metrics_2['C']['utilization_percent'], 20.0)
+        self.assertEqual(metrics_2['D']['utilization_percent'], 20.0)
 
     @patch('subprocess.check_output')
     def test_get_vram_metrics_success(self, mock_check_output):

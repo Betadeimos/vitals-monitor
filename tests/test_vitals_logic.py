@@ -45,7 +45,7 @@ class TestVitalsLogic(unittest.TestCase):
         
         state, msg = vitals.determine_state(metrics, system_ram_percent, self.tracker, threshold_gb=0.1)
         self.assertEqual(state, vitals.CRITICAL)
-        self.assertIn("System RAM > 90%", msg)
+        self.assertIn(f"System RAM > {vitals.CONFIG['tier2']['system_ram_threshold_percent']}%", msg)
 
     def test_tier2_overrides_tier1(self):
         # Both high CPU and high RAM
@@ -54,7 +54,7 @@ class TestVitalsLogic(unittest.TestCase):
         
         state, msg = vitals.determine_state(metrics, system_ram_percent, self.tracker, threshold_gb=0.1)
         self.assertEqual(state, vitals.CRITICAL)
-        self.assertIn("System RAM > 90%", msg)
+        self.assertIn(f"System RAM > {vitals.CONFIG['tier2']['system_ram_threshold_percent']}%", msg)
 
     def test_determine_state_life_support(self):
         metrics = {'cpu_percent': 10.0, 'memory_gb': 1.0}

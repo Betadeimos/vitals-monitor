@@ -7,8 +7,63 @@ import subprocess
 # Windows-only imports for hung state detection
 try:
     import ctypes
+    from ctypes import wintypes
 except ImportError:
     ctypes = None
+
+# IOCTL for getting physical disk number from drive handle
+IOCTL_STORAGE_GET_DEVICE_NUMBER = 0x002D1080
+
+class STORAGE_DEVICE_NUMBER(ctypes.Structure):
+    _fields_ = [
+        ("DeviceType", wintypes.DWORD),
+        ("DeviceNumber", wintypes.DWORD),
+        ("PartitionNumber", wintypes.DWORD),
+    ]
+
+def get_physical_drive_name(drive_letter):
+    """
+    On Windows, maps a logical drive letter (e.g., 'C:') to a physical 
+    drive name used by psutil (e.g., 'PhysicalDrive1').
+    """
+    if os.name != 'nt' or ctypes is None:
+        return drive_letter
+    
+    # Normalize drive letter for CreateFile
+    dl = drive_letter.strip("\\")
+    drive_path = f"\\\\.\\{dl}"
+    
+    # Open handle to the drive
+    h_device = ctypes.windll.kernel32.CreateFileW(
+        drive_path,
+        0, # No access needed
+        0x00000001 | 0x00000002, # FILE_SHARE_READ | FILE_SHARE_WRITE
+        None,
+        3, # OPEN_EXISTING
+        0,
+        None
+    )
+    
+    if h_device == -1:
+        return drive_letter # Fallback
+    
+    sdn = STORAGE_DEVICE_NUMBER()
+    bytes_returned = wintypes.DWORD()
+    
+    success = ctypes.windll.kernel32.DeviceIoControl(
+        h_device,
+        IOCTL_STORAGE_GET_DEVICE_NUMBER,
+        None, 0,
+        ctypes.byref(sdn), ctypes.sizeof(sdn),
+        ctypes.byref(bytes_returned),
+        None
+    )
+    
+    ctypes.windll.kernel32.CloseHandle(h_device)
+    
+    if success:
+        return f"PhysicalDrive{sdn.DeviceNumber}"
+    return drive_letter
 
 def is_process_responding(pid):
     """
@@ -45,26 +100,74 @@ def is_process_responding(pid):
         # On error, default to True (conservative)
         return True
 
+def get_main_window_handle(pid):
+    """
+    Finds the main window handle (HWND) for a given process PID on Windows.
+    Returns None if not found or not on Windows.
+    """
+    if os.name != 'nt' or ctypes is None:
+        return None
+    
+    try:
+        found_hwnd = [None]
+        WNDENUMPROC = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_int, ctypes.c_void_p)
+        
+        def enum_handler(hwnd, lparam):
+            lp_pid = ctypes.c_ulong()
+            ctypes.windll.user32.GetWindowThreadProcessId(hwnd, ctypes.byref(lp_pid))
+            if lp_pid.value == pid:
+                # We prioritize visible windows as the "main" window
+                if ctypes.windll.user32.IsWindowVisible(hwnd):
+                    found_hwnd[0] = hwnd
+                    return False  # Stop enumerating
+            return True
+
+        cb_handler = WNDENUMPROC(enum_handler)
+        ctypes.windll.user32.EnumWindows(cb_handler, 0)
+        return found_hwnd[0]
+    except Exception:
+        return None
+
+def attempt_rescue(pid):
+    """
+    Sends a WM_KEYDOWN message with VK_ESCAPE to the process's main window.
+    Only works on Windows.
+    """
+    if os.name != 'nt' or ctypes is None:
+        return False
+    
+    hwnd = get_main_window_handle(pid)
+    if hwnd:
+        try:
+            WM_KEYDOWN = 0x0100
+            VK_ESCAPE = 0x1B
+            # PostMessageW(hwnd, msg, wparam, lparam)
+            ctypes.windll.user32.PostMessageW(hwnd, WM_KEYDOWN, VK_ESCAPE, 0)
+            return True
+        except Exception:
+            pass
+    return False
+
 def find_process(target_script_name):
     """
     Scans running processes to find one that matches the target script name.
     """
-    for proc in psutil.process_iter(['name', 'cmdline']):
+    for proc in psutil.process_iter(attrs=['pid', 'name', 'cmdline']):
         try:
+            name = proc.info.get('name') or ""
+            cmdline = proc.info.get('cmdline') or []
+
             # Check by process name directly first
-            if target_script_name.lower() in proc.info['name'].lower():
+            if target_script_name.lower() in name.lower():
                 return proc
-                
+
             # Check if it's a python process and if the target script is in its cmdline
-            name = proc.info['name']
             if 'python' in name.lower():
-                cmdline = proc.info['cmdline']
-                if cmdline and any(target_script_name in arg for arg in cmdline):
+                if any(target_script_name in arg for arg in cmdline):
                     return proc
         except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
             continue
     return None
-
 def get_process_metrics(proc):
     """
     Retrieves CPU and RAM usage for a given process.
@@ -75,7 +178,8 @@ def get_process_metrics(proc):
         # For the first call, it might return 0.0.
         cpu_percent = proc.cpu_percent(interval=None) 
         # Normalize CPU by dividing by number of cores
-        cpu_percent = cpu_percent / psutil.cpu_count()
+        count = psutil.cpu_count() or 1
+        cpu_percent = cpu_percent / count
         
         memory_info = proc.memory_info()
         memory_gb = memory_info.rss / (1024 * 1024 * 1024)
@@ -90,47 +194,138 @@ def get_process_metrics(proc):
             'priority': priority,
             'cpu_affinity': cpu_affinity
         }
-    except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+    except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess, AttributeError):
         return None
+
+_pdh_query = None
+_pdh_counters = {}
+
+def _init_pdh():
+    global _pdh_query, _pdh_counters
+    if os.name != 'nt' or ctypes is None:
+        return
+    
+    try:
+        _pdh_query = PDH_HQUERY()
+        # PdhOpenQueryW(szDataSource, dwUserData, phQuery)
+        status = ctypes.windll.pdh.PdhOpenQueryW(None, 0, ctypes.byref(_pdh_query))
+        if status != 0:
+            _pdh_query = None
+            return
+
+        # Use PdhAddEnglishCounterW to avoid localization issues
+        # It uses the English names even on localized Windows versions
+        for drive in ["C:", "D:"]:
+            drive_name = get_physical_drive_name(drive)
+            if drive_name.startswith("PhysicalDrive"):
+                disk_index = drive_name.replace("PhysicalDrive", "")
+                # Path: \PhysicalDisk(index)\% Disk Time
+                path = f"\\PhysicalDisk({disk_index})\\% Disk Time"
+                counter = PDH_HCOUNTER()
+                # PdhAddEnglishCounterW(hQuery, szFullCounterPath, dwUserData, phCounter)
+                status = ctypes.windll.pdh.PdhAddEnglishCounterW(_pdh_query, path, 0, ctypes.byref(counter))
+                if status == 0:
+                    _pdh_counters[drive[0]] = counter
+        
+        # Prime the counters
+        ctypes.windll.pdh.PdhCollectQueryData(_pdh_query)
+    except Exception:
+        _pdh_query = None
 
 def get_storage_metrics():
     """
-    Return a dictionary with "C" and "D" usage (used, total in GB).
+    Returns a dictionary with drive utilization (Active Time %).
+    Uses high-precision sub-sampling with a byte-activity fallback for guaranteed signal.
     """
+    if os.name != 'nt':
+        return {}
+
+    try:
+        # High precision sub-sampling
+        t1 = time.perf_counter()
+        io1 = psutil.disk_io_counters(perdisk=True)
+        
+        time.sleep(0.1) # 100ms sample window
+        
+        t2 = time.perf_counter()
+        io2 = psutil.disk_io_counters(perdisk=True)
+        
+        dt_s = t2 - t1
+    except Exception:
+        return {"C": {"utilization_percent": 0.0}, "D": {"utilization_percent": 0.0}}
+
     metrics = {}
-    for drive in ["C:", "D:"]:
-        try:
-            usage = psutil.disk_usage(drive)
-            metrics[drive[0]] = {
-                'used_gb': round(usage.used / (1024 ** 3), 1),
-                'total_gb': round(usage.total / (1024 ** 3), 1)
-            }
-        except (FileNotFoundError, PermissionError, OSError):
-            # Drive might not exist or be accessible
-            pass
+    
+    # Mapping C: and D:
+    for letter in ["C", "D"]:
+        p_name = get_physical_drive_name(letter + ":")
+        io_key = p_name if p_name in io1 else (letter + ":" if (letter + ":") in io1 else None)
+            
+        util = 0.0
+        if io_key:
+            c1, c2 = io1[io_key], io2[io_key]
+            
+            # 1. Try time-based (busy_time is best, read+write time is fallback)
+            b1 = getattr(c1, 'busy_time', c1.read_time + c1.write_time)
+            b2 = getattr(c2, 'busy_time', c2.read_time + c2.write_time)
+            dbusy_ms = b2 - b1
+            util = (dbusy_ms / (dt_s * 1000)) * 100
+            
+            # 2. Aggressive Byte Fallback (Task Manager Active Time reflects I/O intensity)
+            # If util is suspiciously low (< 5%) but bytes are moving fast, use throughput
+            bytes_moved = (c2.read_bytes + c2.write_bytes) - (c1.read_bytes + c1.write_bytes)
+            if bytes_moved > 0:
+                mb_s = (bytes_moved / (1024 * 1024)) / dt_s
+                # Synthetic: 10MB/s = 100% active time for high-signal UI movement
+                synthetic_util = mb_s * 10 
+                util = max(util, min(synthetic_util, 100.0))
+        
+        metrics[letter] = {'utilization_percent': round(min(max(util, 0.0), 100.0), 1)}
+    
     return metrics
 
-def get_vram_metrics():
+def get_vram_metrics(pid=None):
     """
     Execute nvidia-smi --query-gpu=memory.used,memory.total --format=csv,noheader,nounits.
-    Handle FileNotFoundError or CalledProcessError by returning None.
+    If pid is provided, also try to fetch vram usage for that specific process.
     """
     try:
-        # On Windows, we might need shell=True or the full path if nvidia-smi is not in PATH,
-        # but usually it is if the drivers are installed.
+        # Get total GPU memory
         output = subprocess.check_output(
             ["nvidia-smi", "--query-gpu=memory.used,memory.total", "--format=csv,noheader,nounits"],
             stderr=subprocess.STDOUT
         ).decode('utf-8').strip()
         
-        # Output format: "used, total" (e.g., "512, 8192")
         parts = output.split(',')
         if len(parts) == 2:
             used_mb, total_mb = map(float, parts)
-            return {
+            metrics = {
                 'used_gb': round(used_mb / 1024, 1),
-                'total_gb': round(total_mb / 1024, 1)
+                'total_gb': round(total_mb / 1024, 1),
+                'process_vram_gb': 0.0
             }
+
+            if pid:
+                try:
+                    # Get VRAM usage per PID
+                    apps_output = subprocess.check_output(
+                        ["nvidia-smi", "--query-compute-apps=pid,used_memory", "--format=csv,noheader,nounits"],
+                        stderr=subprocess.STDOUT
+                    ).decode('utf-8').strip()
+                    
+                    for line in apps_output.split('\n'):
+                        if not line.strip(): continue
+                        app_pid_parts = line.split(',')
+                        if len(app_pid_parts) == 2:
+                            app_pid_str, app_vram_str = app_pid_parts
+                            if int(app_pid_str.strip()) == pid:
+                                metrics['process_vram_gb'] = round(float(app_vram_str.strip()) / 1024, 2)
+                                break
+                except Exception:
+                    # If we can't get PID-specific info, fallback to None for process_vram
+                    metrics['process_vram_gb'] = None
+
+            return metrics
     except (subprocess.CalledProcessError, FileNotFoundError, ValueError):
         return None
     return None

@@ -15,6 +15,7 @@ class TestVitalsUIV2(unittest.TestCase):
         self.GREEN = "\033[32m"
         self.YELLOW = "\033[33m"
         self.RED_BLINK = "\033[1;5;31m"
+        self.WHITE = "\033[37m"
         self.CLEAR_LINE = "\033[K"
 
     @patch('psutil.virtual_memory')
@@ -32,18 +33,15 @@ class TestVitalsUIV2(unittest.TestCase):
         # Target: 2/16 = 12.5%
         # Free: 6/16 = 37.5%
         # Bar length 40:
-        # Other Apps: 20 chars (.)
-        # Target: 5 chars (#)
+        # Other Apps: 20 chars (#, WHITE)
+        # Target: 5 chars (#, GREEN)
         # Free: 15 chars (-)
         
-        # I'll need to check if render_ui calls some draw function with these.
-        # Let's assume render_ui will contain this logic.
         output = vitals.render_ui(metrics, state=vitals.NORMAL)
         
-        # Check for white characters (Other Apps) and '#' characters (Target)
-        # Assuming white characters are represented as '.'
-        expected_other = '.' * 20
-        expected_target = '#' * 5
+        # Check for white characters (Other Apps) and state characters (Target)
+        expected_other = f"{self.WHITE}{'■' * 20}{self.RESET}"
+        expected_target = f"{self.GREEN}{'■' * 5}{self.RESET}"
         
         self.assertIn(expected_other, output)
         self.assertIn(expected_target, output)

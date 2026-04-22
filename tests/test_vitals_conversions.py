@@ -52,10 +52,10 @@ class TestVitalsConversions(unittest.TestCase):
         
         # Check if the ratio is correct (4/16 = 25%)
         # Bar length is 40 by default. 25% of 40 is 10.
-        # [##########------------------------------]
-        self.assertIn("#" * 10, bar_output)
+        # [■■■■■■■■■■------------------------------]
+        self.assertIn("■" * 10, bar_output)
         self.assertIn("-" * 30, bar_output)
-        self.assertIn("4.00", bar_output)
+        self.assertIn("25.0%", bar_output)
 
     def test_thresholds_handle_gb_values(self):
         """

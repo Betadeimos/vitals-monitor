@@ -19,9 +19,11 @@ class TestMaxSimulator(unittest.TestCase):
     def test_heavy_calculation(self, mock_time):
         """Test that heavy_calculation logs correctly and exits based on time."""
         # Mocking time.time() to return:
-        # 1. current time for end_time calculation (100.0)
-        # 2. current time for first loop check (106.0)
-        mock_time.side_effect = [100.0, 106.0] 
+        # 1. 100.0 (logging first info)
+        # 2. 101.0 (end_time calculation)
+        # 3. 107.0 (loop check: 107.0 < 101.0 + 5 is False)
+        # 4. 108.0 (logging second info)
+        mock_time.side_effect = [100.0, 101.0, 107.0, 108.0] 
         
         with self.assertLogs('root', level='INFO') as cm:
             # Using small RAM for testing to avoid actual memory pressure in CI

@@ -55,10 +55,10 @@ class TestVitalsUI(unittest.TestCase):
     def test_draw_bar_critical(self):
         # Critical status: Red Blink bar, Cyan borders
         from vitals import CRITICAL
-        output = draw_bar("RAM", 5000, 8192, bar_length=10, char='#', state=CRITICAL)
+        output = draw_bar("RAM", 5000, 8192, bar_length=10, char='■', state=CRITICAL)
         self.assertIn(self.CYAN + "[", output)
         self.assertIn("]" + self.RESET, output)
-        self.assertIn(self.RED_BLINK + "######----", output)
+        self.assertIn(self.RED_BLINK + "■■■■■■----", output)
         self.assertIn("RAM", output)
         self.assertIn(self.RED_BLINK, output)
 
@@ -95,6 +95,24 @@ class TestVitalsUI(unittest.TestCase):
         self.assertIn("Runaway leak!", output)
         self.assertIn(self.RED_BLINK, output)
 
+    def test_render_ui_dynamic_cores(self):
+        from vitals import NORMAL
+        # Mock 16 cores system
+        with patch('psutil.cpu_count', return_value=16):
+            metrics = {
+                'cpu_percent': 10.0, 
+                'memory_gb': 1.0, 
+                'priority': 32, 
+                'cpu_affinity': [2, 3] # Using 2 cores
+            }
+            output = render_ui(metrics, state=NORMAL)
+            self.assertIn("[ CORES: 2/16  ]", output)
+
+            # Change affinity to 4 cores
+            metrics['cpu_affinity'] = [0, 1, 2, 3]
+            output = render_ui(metrics, state=NORMAL)
+            self.assertIn("[ CORES: 4/16  ]", output)
+
     def test_render_ui_ghosting_fix(self):
         """Verify that every line ends with the ANSI clear-line code \033[K."""
         from vitals import NORMAL
@@ -121,7 +139,7 @@ class TestVitalsUI(unittest.TestCase):
             'cpu_affinity': [0, 1]
         }
         storage_metrics = {
-            'C': {'used_gb': 100.0, 'total_gb': 500.0}
+            'C': {'utilization_percent': 20.0}
         }
         vram_metrics = {
             'used_gb': 2.0,
@@ -205,6 +223,60 @@ class TestVitalsUI(unittest.TestCase):
         bar4 = self.strip_ansi(draw_stacked_cpu_bar(99.9))
         self.assertEqual(bar3.index(']') - bar3.index('[') - 1, 40)
         self.assertEqual(bar4.index(']') - bar4.index('[') - 1, 40)
+
+    def test_stacked_bars_visuals(self):
+        from vitals import draw_stacked_ram_bar, draw_stacked_cpu_bar, WHITE, RESET
+        # We need to mock psutil.virtual_memory to get predictable results
+        with patch('psutil.virtual_memory') as mock_vm:
+            # Total 100GB, Used 50GB. Target uses 10GB.
+            # Other = 50 - 10 = 40GB.
+            # other_ratio = 40/100 = 0.4. target_ratio = 10/100 = 0.1.
+            # bar_length = 40.
+            # other_chars = 16. target_chars = 4. free_chars = 20.
+            mock_vm.return_value.total = 100 * (1024**3)
+            mock_vm.return_value.used = 50 * (1024**3)
+            
+            output = draw_stacked_ram_bar(10.0)
+            
+            # Check for WHITE '■' for Other Apps
+            self.assertIn(f"{WHITE}{'■' * 16}{RESET}", output)
+            
+        with patch('psutil.cpu_percent', return_value=50.0):
+            # Total 50%, Target 10%. Other 40%.
+            # other_ratio = 0.4. target_ratio = 0.1.
+            # other_chars = 16. target_chars = 4. idle_chars = 20.
+            output = draw_stacked_cpu_bar(10.0)
+            
+            # Check for WHITE '■' for Other Apps
+            self.assertIn(f"{WHITE}{'■' * 16}{RESET}", output)
+
+    def test_draw_stacked_vram_bar(self):
+        from vitals import draw_stacked_vram_bar, WHITE, GREEN, RESET
+        vram_metrics = {
+            'used_gb': 4.0,
+            'total_gb': 10.0,
+            'process_vram_gb': 1.0
+        }
+        # Total 40%, Target 10%, Other 30%
+        # Bar length 40: Other 12 chars, Target 4 chars, Free 24 chars
+        output = draw_stacked_vram_bar(vram_metrics)
+        self.assertIn(f"{WHITE}{'■' * 12}{RESET}", output)
+        self.assertIn(f"{GREEN}{'■' * 4}{RESET}", output)
+        self.assertIn('-' * 24, output)
+        self.assertIn("40.0%", output)
+
+    def test_draw_stacked_vram_bar_fallback(self):
+        from vitals import draw_stacked_vram_bar, GREEN, RESET
+        vram_metrics = {
+            'used_gb': 4.0,
+            'total_gb': 10.0,
+            'process_vram_gb': None
+        }
+        output = draw_stacked_vram_bar(vram_metrics)
+        # Should use draw_bar: [■■■■■■■■■■■■■■■■------------------------] 40.0%
+        # Note: draw_bar puts RESET after the full bar (boxes + dashes)
+        self.assertIn(f"{GREEN}{'■' * 16}{'-' * 24}{RESET}", output)
+        self.assertIn("40.0%", output)
 
 if __name__ == '__main__':
     unittest.main()

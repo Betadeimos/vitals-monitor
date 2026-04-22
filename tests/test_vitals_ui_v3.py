@@ -15,6 +15,7 @@ class TestVitalsUIV3(unittest.TestCase):
         self.GREEN = "\033[32m"
         self.YELLOW = "\033[33m"
         self.RED_BLINK = "\033[1;5;31m"
+        self.WHITE = "\033[37m"
         self.CLEAR_LINE = "\033[K"
 
     @patch('psutil.cpu_percent')
@@ -25,16 +26,16 @@ class TestVitalsUIV3(unittest.TestCase):
         # Idle: 100 - 50 = 50%
         
         # Bar length 40:
-        # Other Apps ('.'): 40% of 40 = 16 chars
-        # Target ('#'): 10% of 40 = 4 chars
+        # Other Apps ('#', WHITE): 40% of 40 = 16 chars
+        # Target ('#', GREEN): 10% of 40 = 4 chars
         # Idle ('-'): 50% of 40 = 20 chars
         
         mock_cpu_percent.return_value = 50.0
         
         bar = vitals.draw_stacked_cpu_bar(10.0, state=vitals.NORMAL)
         
-        self.assertIn('.' * 16, bar)
-        self.assertIn('#' * 4, bar)
+        self.assertIn(f"{self.WHITE}{'■' * 16}{self.RESET}", bar)
+        self.assertIn(f"{self.GREEN}{'■' * 4}{self.RESET}", bar)
         self.assertIn('-' * 20, bar)
 
     @patch('psutil.cpu_count')

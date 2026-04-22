@@ -145,5 +145,38 @@ class TestVitalsWinAPI(unittest.TestCase):
         mock_user32.IsWindowVisible.assert_any_call(102)
         mock_user32.IsHungAppWindow.assert_called_once_with(101)
 
+    @patch('os.name', 'nt')
+    @patch('vitals_core.ctypes', create=True)
+    def test_get_main_window_handle_windows(self, mock_ctypes):
+        mock_user32 = mock_ctypes.windll.user32
+        mock_pid_obj = MagicMock()
+        mock_pid_obj.value = 1234
+        mock_ctypes.c_ulong.return_value = mock_pid_obj
+        mock_ctypes.byref.side_effect = lambda x: x
+        mock_ctypes.WINFUNCTYPE.return_value = lambda x: x
+        
+        def side_effect_enum(callback, lparam):
+            callback(100, lparam)
+            return True
+        
+        mock_user32.EnumWindows.side_effect = side_effect_enum
+        mock_user32.IsWindowVisible.return_value = True
+        
+        hwnd = vitals_core.get_main_window_handle(1234)
+        self.assertEqual(hwnd, 100)
+
+    @patch('os.name', 'nt')
+    @patch('vitals_core.ctypes', create=True)
+    def test_attempt_rescue_windows(self, mock_ctypes):
+        mock_user32 = mock_ctypes.windll.user32
+        
+        # Mock get_main_window_handle to return 100
+        with patch('vitals_core.get_main_window_handle', return_value=100):
+            success = vitals_core.attempt_rescue(1234)
+            
+            self.assertTrue(success)
+            # WM_KEYDOWN = 0x0100, VK_ESCAPE = 0x1B
+            mock_user32.PostMessageW.assert_called_with(100, 0x0100, 0x1B, 0)
+
 if __name__ == '__main__':
     unittest.main()

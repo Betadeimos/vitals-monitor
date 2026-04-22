@@ -1,0 +1,22 @@
+{
+    "tier1": {
+        "cpu_threshold_percent": 80.0,
+        "ram_spike_threshold_gb": 0.1,
+        "ram_spike_window_seconds": 2.0
+    },
+    "tier2": {
+        "system_ram_threshold_percent": 90.0,
+        "window_seconds": 5.0
+    },
+    "tier3": {
+        "cores_to_strip": [
+            0,
+            1
+        ]
+    },
+    "monitoring": {
+        "refresh_interval_seconds": 0.5,
+        "vram_monitor_interval_seconds": 2.0,
+        "memory_tracker_window_size_seconds": 5.0
+    }
+}
