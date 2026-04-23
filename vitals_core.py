@@ -186,6 +186,25 @@ def get_window_title(pid):
             pass
     return None
 
+def get_foreground_pid():
+    """
+    Returns the PID of the current foreground window on Windows.
+    Returns None if not on Windows or if foreground window cannot be determined.
+    """
+    if os.name != 'nt' or ctypes is None:
+        return None
+    
+    try:
+        hwnd = ctypes.windll.user32.GetForegroundWindow()
+        if not hwnd:
+            return None
+        
+        lp_pid = ctypes.c_ulong()
+        ctypes.windll.user32.GetWindowThreadProcessId(hwnd, ctypes.byref(lp_pid))
+        return lp_pid.value
+    except Exception:
+        return None
+
 def clean_title(title, max_length=40):
     """
     Strips common 3ds Max suffixes and truncates the title to max_length.

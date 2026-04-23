@@ -139,7 +139,6 @@ CLEAR_LINE = "\033[K"
 NORMAL = "NORMAL"
 WARNING = "WARNING"
 CRITICAL = "CRITICAL"
-LIFE_SUPPORT = "LIFE_SUPPORT"
 HUNG = "HUNG"
 
 PRIORITY_MAP = {
@@ -155,7 +154,7 @@ def determine_state(metrics, system_ram_percent, tracker, threshold_gb=None, is_
     """
     Tier 1 (Warning): Triggered by sudden memory spikes OR high CPU.
     Tier 2 (Critical): Triggered ONLY when total system RAM exceeds threshold.
-    Tier 3 (Life Support): Triggered if the process is not responding.
+    Tier 3 (Hung): Triggered if the process is not responding.
     """
     if threshold_gb is None:
         threshold_gb = float(CONFIG["tier1"]["ram_spike_threshold_gb"])
@@ -163,7 +162,7 @@ def determine_state(metrics, system_ram_percent, tracker, threshold_gb=None, is_
         threshold_gb = float(threshold_gb)
 
     if not is_responding:
-        return LIFE_SUPPORT, "Process is NOT RESPONDING (Hung)"
+        return HUNG, "Process is NOT RESPONDING (Hung)"
 
     system_ram_threshold = float(CONFIG["tier2"]["system_ram_threshold_percent"])
     if system_ram_percent > system_ram_threshold:
@@ -179,106 +178,6 @@ def determine_state(metrics, system_ram_percent, tracker, threshold_gb=None, is_
         return WARNING, " | ".join(reasons)
     
     return NORMAL, ""
-
-def set_priority(proc, new_state, current_state=None, ctx=None):
-    """
-    Adjusts the target process priority based on the current state.
-    """
-    if new_state == current_state:
-        return
-    
-    try:
-        if new_state == WARNING:
-            if os.name == 'nt':
-                # Windows: BELOW_NORMAL_PRIORITY_CLASS
-                proc.nice(psutil.BELOW_NORMAL_PRIORITY_CLASS)
-            else:
-                # Unix: Higher nice value means lower priority
-                proc.nice(10)
-            if ctx:
-                ctx['status_msg'] = "[INFO] Throttling process priority for stability..."
-            else:
-                print(f"{CLEAR_LINE}[INFO] Throttling process priority for stability...")
-        elif new_state == NORMAL and current_state == WARNING:
-            if os.name == 'nt':
-                # Windows: NORMAL_PRIORITY_CLASS
-                proc.nice(psutil.NORMAL_PRIORITY_CLASS)
-            else:
-                # Unix: 0 is normal priority
-                proc.nice(0)
-            if ctx:
-                ctx['status_msg'] = "[INFO] Restoring process priority."
-            else:
-                print(f"{CLEAR_LINE}[INFO] Restoring process priority.")
-    except (psutil.AccessDenied, psutil.NoSuchProcess):
-        # Gracefully handle if we can't change priority
-        pass
-
-def apply_life_support(proc, ctx):
-    """
-    Saves current process affinity and priority, then throttles them.
-    """
-    saved_context = ctx['ls_context']
-    if saved_context.get('affinity') is not None:
-        return # Already applied
-    
-    try:
-        # Save current state
-        saved_context['affinity'] = proc.cpu_affinity()
-        saved_context['priority'] = proc.nice()
-        
-        # Throttling
-        ctx['status_msg'] = "[LIFE SUPPORT] Throttling cores & priority..."
-        
-        # Affinity: exclude cores from config if possible
-        count = psutil.cpu_count() or 1
-        all_cores = list(range(count))
-        cores_to_strip = CONFIG["tier3"]["cores_to_strip"]
-        
-        new_affinity = [c for c in all_cores if c not in cores_to_strip]
-        
-        if not new_affinity:
-            # Fallback if all cores were stripped
-            new_affinity = [all_cores[-1]]
-            
-        try:
-            proc.cpu_affinity(new_affinity)
-        except (psutil.AccessDenied, PermissionError):
-             ctx['status_msg'] = "[ERROR] Admin privileges required for affinity throttling."
-        
-        # Priority: IDLE
-        if os.name == 'nt':
-            # psutil.IDLE_PRIORITY_CLASS might not be defined on all platforms, 
-            # but we are in a block that checks os.name == 'nt'
-            proc.nice(getattr(psutil, 'IDLE_PRIORITY_CLASS', 0x00000040))
-        else:
-            proc.nice(19) # Maximum nice value on Unix
-            
-    except (psutil.AccessDenied, psutil.NoSuchProcess):
-        # Clear context if we failed to set everything so we don't think we are in LS
-        saved_context['affinity'] = None
-        saved_context['priority'] = None
-
-def restore_life_support(proc, ctx):
-    """
-    Restores original process affinity and priority.
-    """
-    saved_context = ctx['ls_context']
-    if saved_context.get('affinity') is None:
-        return
-        
-    try:
-        ctx['status_msg'] = "[LIFE SUPPORT] Restoring original affinity & priority."
-        try:
-            proc.cpu_affinity(saved_context['affinity'])
-        except (psutil.AccessDenied, PermissionError):
-            ctx['status_msg'] = "[ERROR] Admin privileges required for affinity restoration."
-        proc.nice(saved_context['priority'])
-    except (psutil.AccessDenied, psutil.NoSuchProcess):
-        pass
-    finally:
-        saved_context['affinity'] = None
-        saved_context['priority'] = None
 
 def get_usage_color(percent):
     if percent <= 50:
@@ -317,8 +216,6 @@ def draw_bar(label, value, max_value, bar_length=40, char='■', state=NORMAL):
     
     if state in (CRITICAL, HUNG):
         color = RED_BLINK
-    elif state == LIFE_SUPPORT:
-        color = ORANGE
     elif state == WARNING:
         color = YELLOW
     else:
@@ -365,8 +262,6 @@ def draw_stacked_ram_bar(target_gb, state=NORMAL):
 
     if state in (CRITICAL, HUNG):
         target_color = RED_BLINK
-    elif state == LIFE_SUPPORT:
-        target_color = ORANGE
     elif state == WARNING:
         target_color = YELLOW
     else:
@@ -419,8 +314,6 @@ def draw_stacked_cpu_bar(target_cpu_percent, system_cpu_percent=None, state=NORM
 
     if state in (CRITICAL, HUNG):
         target_color = RED_BLINK
-    elif state == LIFE_SUPPORT:
-        target_color = ORANGE
     elif state == WARNING:
         target_color = YELLOW
     else:
@@ -489,8 +382,6 @@ def draw_stacked_vram_bar(vram_metrics, state=NORMAL):
 
     if state in (CRITICAL, HUNG):
         target_color = RED_BLINK
-    elif state == LIFE_SUPPORT:
-        target_color = ORANGE
     elif state == WARNING:
         target_color = YELLOW
     else:
@@ -507,6 +398,117 @@ def draw_stacked_vram_bar(vram_metrics, state=NORMAL):
     border_close = f"{CYAN}]{RESET}"
     
     return f"{label_str} {border_open}{other_bar}{target_bar}{free_bar}{border_close} {vram_percent:.1f}%"
+
+_suspended_hogs = set()
+
+def manage_orchestration(active_instances, system_ram_percent, foreground_pid):
+    """
+    Handles VIP elevation and collateral management based on RAM pressure.
+    - RAM > 80%: VIP gets HIGH_PRIORITY_CLASS, non-VIP and hogs are suspended.
+    - RAM <= 80%: Everything restored to NORMAL_PRIORITY_CLASS and resumed.
+    """
+    global _suspended_hogs
+    RAM_THRESHOLD = 80.0
+    COLLATERAL_NAMES = ["chrome.exe", "msedge.exe"]
+    
+    # Priority constants (Windows specific in psutil)
+    HIGH_PRIORITY = getattr(psutil, 'HIGH_PRIORITY_CLASS', 128)
+    NORMAL_PRIORITY = getattr(psutil, 'NORMAL_PRIORITY_CLASS', 32)
+    
+    is_high_pressure = system_ram_percent > RAM_THRESHOLD
+    
+    # 1. Handle active instances (VIP Elevation & Suspend non-VIP)
+    for pid, ctx in active_instances.items():
+        proc = ctx['proc']
+        try:
+            if pid == foreground_pid:
+                # VIP Logic
+                if is_high_pressure:
+                    # Elevate VIP
+                    if proc.nice() != HIGH_PRIORITY:
+                        proc.nice(HIGH_PRIORITY)
+                    ctx['status_msg'] = "[ STATUS: VIP - HIGH PRIORITY ]"
+                else:
+                    # Restore VIP
+                    if proc.nice() != NORMAL_PRIORITY:
+                        proc.nice(NORMAL_PRIORITY)
+                    if ctx['status_msg'] == "[ STATUS: VIP - HIGH PRIORITY ]":
+                        ctx['status_msg'] = None
+                
+                # Ensure VIP is NOT suspended
+                if proc.status() == psutil.STATUS_STOPPED:
+                    proc.resume()
+            else:
+                # Non-VIP Logic
+                if is_high_pressure:
+                    # Suspend non-VIP
+                    if proc.status() != psutil.STATUS_STOPPED:
+                        proc.suspend()
+                    ctx['status_msg'] = "[ STATUS: SUSPENDED TO RECLAIM RAM ]"
+                else:
+                    # Resume non-VIP
+                    if proc.status() == psutil.STATUS_STOPPED:
+                        proc.resume()
+                    if ctx['status_msg'] == "[ STATUS: SUSPENDED TO RECLAIM RAM ]":
+                        ctx['status_msg'] = None
+                
+                # Ensure Normal Priority for non-VIP
+                if proc.nice() != NORMAL_PRIORITY:
+                    proc.nice(NORMAL_PRIORITY)
+                    
+        except (psutil.NoSuchProcess, psutil.AccessDenied, AttributeError):
+            continue
+
+    # 2. Handle Other Hogs (chrome, edge)
+    if is_high_pressure:
+        for proc in psutil.process_iter(['pid', 'name']):
+            try:
+                p_name = proc.info['name']
+                if p_name and p_name.lower() in COLLATERAL_NAMES:
+                    # Don't suspend if it's the foreground process
+                    if proc.pid == foreground_pid:
+                        continue
+                    if proc.status() != psutil.STATUS_STOPPED:
+                        proc.suspend()
+                        _suspended_hogs.add(proc.pid)
+            except (psutil.NoSuchProcess, psutil.AccessDenied, AttributeError):
+                continue
+    else:
+        # Resume previously suspended hogs
+        for pid in list(_suspended_hogs):
+            try:
+                proc = psutil.Process(pid)
+                if proc.status() == psutil.STATUS_STOPPED:
+                    proc.resume()
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                pass
+        _suspended_hogs.clear()
+
+def resume_all(active_instances=None):
+    """
+    Resumes all tracked instances and any collateral hogs that were suspended.
+    """
+    global _suspended_hogs
+    
+    # 1. Resume tracked instances
+    if active_instances:
+        for ctx in active_instances.values():
+            try:
+                proc = ctx['proc']
+                if proc.is_running() and proc.status() == psutil.STATUS_STOPPED:
+                    proc.resume()
+            except (psutil.NoSuchProcess, psutil.AccessDenied, AttributeError):
+                pass
+            
+    # 2. Resume collateral hogs
+    for pid in list(_suspended_hogs):
+        try:
+            proc = psutil.Process(pid)
+            if proc.is_running() and proc.status() == psutil.STATUS_STOPPED:
+                proc.resume()
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            pass
+    _suspended_hogs.clear()
 
 def render_ui(metrics=None, storage_metrics=None, vram_metrics=None, system_cpu=None, state=NORMAL, warning_msg="", instances=None):
     WIDTH = 80
@@ -595,7 +597,7 @@ def render_ui(metrics=None, storage_metrics=None, vram_metrics=None, system_cpu=
                 if shared_gb > 0:
                     vram_state = CRITICAL
                 elif i_vram['total_gb'] > 0 and (i_vram['used_gb'] / i_vram['total_gb']) > 0.9:
-                    vram_state = LIFE_SUPPORT # ORANGE
+                    vram_state = WARNING # ORANGE/YELLOW
                 
                 lines.append(format_line(draw_stacked_vram_bar(i_vram, state=vram_state)))
                 
@@ -613,14 +615,10 @@ def render_ui(metrics=None, storage_metrics=None, vram_metrics=None, system_cpu=
         if i_status:
             if i_state == WARNING:
                 msg_line = f"{YELLOW}{i_status}{RESET}"
-            elif i_state == LIFE_SUPPORT:
-                msg_line = f"{ORANGE}{i_status}{RESET}"
             else:
                 msg_line = f"{CYAN}{i_status}{RESET}"
         elif i_state == CRITICAL:
             msg_line = f"{RED_BLINK}!!! CRITICAL: SYSTEM RAM EXHAUSTED !!!{RESET}"
-        elif i_state == LIFE_SUPPORT:
-            msg_line = f"{ORANGE}!!! LIFE SUPPORT: THROTTLING CORES & PRIORITY !!!{RESET}"
         elif i_state == HUNG:
             msg_line = f"{RED_BLINK}!!! PROCESS HUNG (NOT RESPONDING) !!!{RESET}"
         elif i_state == WARNING:
@@ -632,7 +630,7 @@ def render_ui(metrics=None, storage_metrics=None, vram_metrics=None, system_cpu=
         
         lines.append(format_line(msg_line, align='center'))
         if i_msg:
-            color = RED_BLINK if i_state in (CRITICAL, HUNG) else (ORANGE if i_state == LIFE_SUPPORT else YELLOW)
+            color = RED_BLINK if i_state in (CRITICAL, HUNG) else YELLOW
             lines.append(format_line(f"{color}{detail_line}{RESET}", align='center'))
         else:
             lines.append(format_line("", align='center'))
@@ -703,7 +701,6 @@ def start_monitoring(target_script_name=None, threshold_gb=None, interval_s=None
                         'proc': proc,
                         'tracker': MemoryTracker(),
                         'state': NORMAL,
-                        'ls_context': {'affinity': None, 'priority': None},
                         'vram_monitor': vram_monitor,
                         'title': vitals_core.get_window_title(proc.pid),
                         'status_msg': None
@@ -733,6 +730,10 @@ def start_monitoring(target_script_name=None, threshold_gb=None, interval_s=None
             system_ram_percent = psutil.virtual_memory().percent
             storage_metrics = vitals_core.get_storage_metrics()
             
+            # 3. VIP Detection & Orchestration
+            foreground_pid = vitals_core.get_foreground_pid()
+            manage_orchestration(active_instances, system_ram_percent, foreground_pid)
+
             instances_data = []
             has_critical = False
             critical_proc = None
@@ -741,7 +742,6 @@ def start_monitoring(target_script_name=None, threshold_gb=None, interval_s=None
             for pid, ctx in list(active_instances.items()):
                 proc = ctx['proc']
                 tracker = ctx['tracker']
-                ls_context = ctx['ls_context']
                 vram_monitor = ctx['vram_monitor']
                 current_state = ctx['state']
                 
@@ -754,27 +754,6 @@ def start_monitoring(target_script_name=None, threshold_gb=None, interval_s=None
                 is_responding = vitals_core.is_process_responding(proc.pid)
                 state, msg = determine_state(metrics, system_ram_percent, tracker, threshold_gb=threshold_gb, is_responding=is_responding)
                 
-                # Rescue attempt on Windows if CRITICAL
-                if state == CRITICAL and os.name == 'nt':
-                    if not ls_context.get('rescue_attempted'):
-                        vitals_core.attempt_rescue(proc.pid)
-                        ls_context['rescue_attempted'] = True
-                        ls_context['rescue_msg'] = "[RESCUE] Sending ESCAPE signal to abort calculation..."
-                    
-                    if ls_context.get('rescue_msg'):
-                        msg += f" | {ls_context['rescue_msg']}"
-                elif state in (NORMAL, WARNING):
-                    ls_context['rescue_attempted'] = False
-                    ls_context['rescue_msg'] = None
-
-                # Life Support handling
-                if state == LIFE_SUPPORT:
-                    apply_life_support(proc, ctx)
-                elif current_state == LIFE_SUPPORT and state != LIFE_SUPPORT:
-                    restore_life_support(proc, ctx)
-
-                # Update priority if state changed
-                set_priority(proc, state, current_state, ctx)
                 ctx['state'] = state
                 
                 if state == CRITICAL:
@@ -847,6 +826,7 @@ def start_monitoring(target_script_name=None, threshold_gb=None, interval_s=None
                 
             time.sleep(interval_s)
     finally:
+        resume_all(active_instances)
         for ctx in active_instances.values():
             ctx['vram_monitor'].stop()
 
@@ -855,6 +835,7 @@ def main():
         args = parse_args()
         start_monitoring(args.target, args.threshold, args.interval)
     except KeyboardInterrupt:
+        resume_all()
         clear_screen(full=True)
         print(f"{CLEAR_LINE}[INFO] Monitoring terminated by user. Exiting...")
         sys.exit(0)

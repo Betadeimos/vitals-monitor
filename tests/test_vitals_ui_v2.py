@@ -47,26 +47,5 @@ class TestVitalsUIV2(unittest.TestCase):
         self.assertIn(expected_target, output)
         self.assertIn('-' * 15, output)
 
-    @patch('sys.stdout.write')
-    def test_ghosting_fix_prepended_clear_line(self, mock_write):
-        # The prompt says to prepend \033[K to print statements outside the main block.
-        # Like info messages or kill prompts.
-        
-        # Let's test set_priority
-        mock_proc = MagicMock()
-        vitals.set_priority(mock_proc, vitals.WARNING, vitals.NORMAL)
-        
-        # Verify that \033[K was printed before the message
-        calls = [call[0][0] for call in mock_write.call_args_list]
-        found = False
-        for call in calls:
-            # print() calls write with the string then usually with \n
-            if self.CLEAR_LINE in call and "[INFO]" in call:
-                if call.startswith(self.CLEAR_LINE):
-                    found = True
-                    break
-        
-        self.assertTrue(found, f"CLEAR_LINE code not found prepended to INFO message in: {calls}")
-
 if __name__ == '__main__':
     unittest.main()

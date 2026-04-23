@@ -6,7 +6,7 @@ from unittest.mock import patch, MagicMock
 # Add the root directory to sys.path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from vitals import render_ui, NORMAL, WARNING, CRITICAL, LIFE_SUPPORT
+from vitals import render_ui, NORMAL, WARNING, CRITICAL
 
 class TestTaskRequirements(unittest.TestCase):
     def strip_ansi(self, text):

@@ -56,14 +56,6 @@ class TestVitalsLogic(unittest.TestCase):
         self.assertEqual(state, vitals.CRITICAL)
         self.assertIn(f"System RAM > {vitals.CONFIG['tier2']['system_ram_threshold_percent']}%", msg)
 
-    def test_determine_state_life_support(self):
-        metrics = {'cpu_percent': 10.0, 'memory_gb': 1.0}
-        system_ram_percent = 50.0
-        
-        state, msg = vitals.determine_state(metrics, system_ram_percent, self.tracker, threshold_gb=0.1, is_responding=False)
-        self.assertEqual(state, vitals.LIFE_SUPPORT)
-        self.assertIn("NOT RESPONDING", msg)
-
     def test_determine_state_string_config(self):
         # Verify that string values in config are correctly cast to floats
         original_cpu_threshold = vitals.CONFIG["tier1"]["cpu_threshold_percent"]
