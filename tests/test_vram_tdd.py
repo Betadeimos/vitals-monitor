@@ -25,22 +25,22 @@ class TestVRAMTDD(unittest.TestCase):
             b"123, 512\n456, 256\n" # 3rd call: nvidia-smi apps
         ]
         
-        metrics = vitals_core.get_vram_metrics(pid=123)
+        metrics = vitals_core.get_vram_metrics(pids=[123])
         
         self.assertEqual(metrics['used_gb'], 1.0)
         self.assertEqual(metrics['total_gb'], 8.0)
         self.assertEqual(metrics['shared_used_gb'], 0.5)
-        self.assertEqual(metrics['process_vram_gb'], 0.5) # 512 / 1024
+        self.assertEqual(metrics['per_pid_vram_gb'][123], 0.5) # 512 / 1024
 
     @patch('subprocess.check_output')
     def test_get_vram_metrics_no_pid(self, mock_output):
         mock_output.return_value = b"2048, 8192\n"
         
-        metrics = vitals_core.get_vram_metrics(pid=None)
+        metrics = vitals_core.get_vram_metrics(pids=None)
         
         self.assertEqual(metrics['used_gb'], 2.0)
         self.assertEqual(metrics['total_gb'], 8.0)
-        self.assertEqual(metrics.get('process_vram_gb'), 0.0)
+        self.assertEqual(metrics.get('per_pid_vram_gb'), {})
 
     def test_draw_stacked_vram_bar_formatting(self):
         vram_metrics = {

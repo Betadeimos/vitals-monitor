@@ -35,19 +35,20 @@ class TestOrchestrator(unittest.TestCase):
         }
         
         # 2. High RAM case
-        vitals.manage_orchestration(active_instances, 85.0, vip_pid)
+        all_procs = []
+        vitals.manage_orchestration(active_instances, 85.0, vip_pid, all_procs)
         
         # Verify VIP elevation
         vip_proc.nice.assert_called_with(psutil.HIGH_PRIORITY_CLASS)
         self.assertEqual(active_instances[vip_pid]['status_msg'], "[ STATUS: VIP - HIGH PRIORITY ]")
         
-        # Verify Other suspension
-        other_proc.suspend.assert_called_once()
-        self.assertEqual(active_instances[other_pid]['status_msg'], "[ STATUS: SUSPENDED TO RECLAIM RAM ]")
+        # Verify Other demotion
+        other_proc.nice.assert_called_with(psutil.IDLE_PRIORITY_CLASS)
+        self.assertEqual(active_instances[other_pid]['status_msg'], "[ STATUS: DEMOTED TO RECLAIM RAM ]")
 
     @patch('psutil.process_iter')
     def test_orchestrator_normal_ram_behavior(self, mock_process_iter):
-        # 1. Setup Mock Instances (previously elevated/suspended)
+        # 1. Setup Mock Instances (previously elevated/demoted)
         vip_pid = 1000
         other_pid = 2000
         
@@ -58,23 +59,24 @@ class TestOrchestrator(unittest.TestCase):
         
         other_proc = MagicMock()
         other_proc.pid = other_pid
-        other_proc.nice.return_value = 32
-        other_proc.status.return_value = 'stopped' # Stopped
+        other_proc.nice.return_value = 64 # Idle
+        other_proc.status.return_value = 'running'
         
         active_instances = {
             vip_pid: {'proc': vip_proc, 'status_msg': "[ STATUS: VIP - HIGH PRIORITY ]"},
-            other_pid: {'proc': other_proc, 'status_msg': "[ STATUS: SUSPENDED TO RECLAIM RAM ]"}
+            other_pid: {'proc': other_proc, 'status_msg': "[ STATUS: DEMOTED TO RECLAIM RAM ]"}
         }
         
         # 2. Normal RAM case
-        vitals.manage_orchestration(active_instances, 70.0, vip_pid)
+        all_procs = []
+        vitals.manage_orchestration(active_instances, 70.0, vip_pid, all_procs)
         
         # Verify VIP restoration
         vip_proc.nice.assert_called_with(psutil.NORMAL_PRIORITY_CLASS)
         self.assertIsNone(active_instances[vip_pid]['status_msg'])
         
-        # Verify Other resumption
-        other_proc.resume.assert_called_once()
+        # Verify Other restoration
+        other_proc.nice.assert_called_with(psutil.NORMAL_PRIORITY_CLASS)
         self.assertIsNone(active_instances[other_pid]['status_msg'])
 
     @patch('psutil.Process')
@@ -83,7 +85,7 @@ class TestOrchestrator(unittest.TestCase):
         # Mock chrome and edge
         chrome_proc = MagicMock()
         chrome_proc.info = {'name': 'chrome.exe'}
-        chrome_proc.status.return_value = 'running'
+        chrome_proc.nice.return_value = 32 # Normal initially
         chrome_proc.pid = 3000
         
         # When psutil.Process(3000) is called, return chrome_proc
@@ -93,15 +95,17 @@ class TestOrchestrator(unittest.TestCase):
         active_instances = {}
         
         # High RAM
-        vitals.manage_orchestration(active_instances, 85.0, 0)
-        chrome_proc.suspend.assert_called_once()
+        all_procs = [chrome_proc]
+        vitals.manage_orchestration(active_instances, 85.0, 0, all_procs)
+        chrome_proc.nice.assert_called_with(psutil.IDLE_PRIORITY_CLASS)
         
-        # Simulate chrome_proc is now stopped
-        chrome_proc.status.return_value = 'stopped'
+        # Simulate chrome_proc is now demoted
+        chrome_proc.nice.return_value = psutil.IDLE_PRIORITY_CLASS
+        chrome_proc.is_running.return_value = True
         
         # Low RAM
-        vitals.manage_orchestration(active_instances, 70.0, 0)
-        chrome_proc.resume.assert_called_once()
+        vitals.manage_orchestration(active_instances, 70.0, 0, all_procs)
+        chrome_proc.nice.assert_called_with(psutil.NORMAL_PRIORITY_CLASS)
 
 if __name__ == '__main__':
     unittest.main()

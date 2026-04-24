@@ -56,7 +56,7 @@ class VRAMMonitor:
     def __init__(self, interval=None):
         self.interval = interval if interval is not None else CONFIG["monitoring"]["vram_monitor_interval_seconds"]
         self.current_metrics = None
-        self.target_pid = None
+        self.target_pids = set()
         self.running = True
         self._lock = threading.Lock()
         self.thread = threading.Thread(target=self._update_loop, daemon=True)
@@ -65,15 +65,40 @@ class VRAMMonitor:
     def _update_loop(self):
         while self.running:
             with self._lock:
-                pid = self.target_pid
-            metrics = vitals_core.get_vram_metrics(pid=pid)
+                pids = list(self.target_pids)
+            metrics = vitals_core.get_vram_metrics(pids=pids)
             with self._lock:
                 self.current_metrics = metrics
             time.sleep(self.interval)
 
-    def set_target_pid(self, pid):
+    def update_pids(self, pids):
         with self._lock:
-            self.target_pid = pid
+            self.target_pids = set(pids)
+
+    def get_metrics(self):
+        with self._lock:
+            return self.current_metrics
+
+    def stop(self):
+        self.running = False
+
+class StorageMonitor:
+    """Non-blocking Storage monitor that runs in a daemon thread."""
+    def __init__(self, interval=1.0):
+        self.interval = interval
+        self.current_metrics = {}
+        self.running = True
+        self._lock = threading.Lock()
+        self.thread = threading.Thread(target=self._update_loop, daemon=True)
+        self.thread.start()
+
+    def _update_loop(self):
+        while self.running:
+            metrics = vitals_core.get_storage_metrics()
+            with self._lock:
+                self.current_metrics = metrics
+            # Storage metrics sample for 100ms internally, so we sleep for the rest
+            time.sleep(max(0, self.interval - 0.1))
 
     def get_metrics(self):
         with self._lock:
@@ -399,25 +424,26 @@ def draw_stacked_vram_bar(vram_metrics, state=NORMAL):
     
     return f"{label_str} {border_open}{other_bar}{target_bar}{free_bar}{border_close} {vram_percent:.1f}%"
 
-_suspended_hogs = set()
+_demoted_hogs = set()
 
-def manage_orchestration(active_instances, system_ram_percent, foreground_pid):
+def manage_orchestration(active_instances, system_ram_percent, foreground_pid, all_procs):
     """
     Handles VIP elevation and collateral management based on RAM pressure.
-    - RAM > 80%: VIP gets HIGH_PRIORITY_CLASS, non-VIP and hogs are suspended.
-    - RAM <= 80%: Everything restored to NORMAL_PRIORITY_CLASS and resumed.
+    - RAM > 80%: VIP gets HIGH_PRIORITY_CLASS, non-VIP and hogs are demoted to IDLE_PRIORITY_CLASS.
+    - RAM <= 80%: Everything restored to NORMAL_PRIORITY_CLASS.
     """
-    global _suspended_hogs
+    global _demoted_hogs
     RAM_THRESHOLD = 80.0
     COLLATERAL_NAMES = ["chrome.exe", "msedge.exe"]
     
     # Priority constants (Windows specific in psutil)
     HIGH_PRIORITY = getattr(psutil, 'HIGH_PRIORITY_CLASS', 128)
     NORMAL_PRIORITY = getattr(psutil, 'NORMAL_PRIORITY_CLASS', 32)
+    IDLE_PRIORITY = getattr(psutil, 'IDLE_PRIORITY_CLASS', 64)
     
     is_high_pressure = system_ram_percent > RAM_THRESHOLD
     
-    # 1. Handle active instances (VIP Elevation & Suspend non-VIP)
+    # 1. Handle active instances (VIP Elevation & Demote non-VIP)
     for pid, ctx in active_instances.items():
         proc = ctx['proc']
         try:
@@ -434,83 +460,81 @@ def manage_orchestration(active_instances, system_ram_percent, foreground_pid):
                         proc.nice(NORMAL_PRIORITY)
                     if ctx['status_msg'] == "[ STATUS: VIP - HIGH PRIORITY ]":
                         ctx['status_msg'] = None
-                
-                # Ensure VIP is NOT suspended
-                if proc.status() == psutil.STATUS_STOPPED:
-                    proc.resume()
             else:
                 # Non-VIP Logic
                 if is_high_pressure:
-                    # Suspend non-VIP
-                    if proc.status() != psutil.STATUS_STOPPED:
-                        proc.suspend()
-                    ctx['status_msg'] = "[ STATUS: SUSPENDED TO RECLAIM RAM ]"
+                    # Demote non-VIP
+                    if proc.nice() != IDLE_PRIORITY:
+                        proc.nice(IDLE_PRIORITY)
+                        import vitals_core
+                        vitals_core.empty_working_set(proc.pid)
+                    ctx['status_msg'] = "[ STATUS: DEMOTED TO RECLAIM RAM ]"
                 else:
-                    # Resume non-VIP
-                    if proc.status() == psutil.STATUS_STOPPED:
-                        proc.resume()
-                    if ctx['status_msg'] == "[ STATUS: SUSPENDED TO RECLAIM RAM ]":
+                    # Restore non-VIP
+                    if proc.nice() != NORMAL_PRIORITY:
+                        proc.nice(NORMAL_PRIORITY)
+                    if ctx['status_msg'] == "[ STATUS: DEMOTED TO RECLAIM RAM ]":
                         ctx['status_msg'] = None
-                
-                # Ensure Normal Priority for non-VIP
-                if proc.nice() != NORMAL_PRIORITY:
-                    proc.nice(NORMAL_PRIORITY)
                     
         except (psutil.NoSuchProcess, psutil.AccessDenied, AttributeError):
             continue
 
     # 2. Handle Other Hogs (chrome, edge)
     if is_high_pressure:
-        for proc in psutil.process_iter(['pid', 'name']):
+        for proc in all_procs:
             try:
                 p_name = proc.info['name']
                 if p_name and p_name.lower() in COLLATERAL_NAMES:
-                    # Don't suspend if it's the foreground process
+                    # Don't demote if it's the foreground process
                     if proc.pid == foreground_pid:
                         continue
-                    if proc.status() != psutil.STATUS_STOPPED:
-                        proc.suspend()
-                        _suspended_hogs.add(proc.pid)
-            except (psutil.NoSuchProcess, psutil.AccessDenied, AttributeError):
+                    if proc.nice() != IDLE_PRIORITY:
+                        proc.nice(IDLE_PRIORITY)
+                        import vitals_core
+                        vitals_core.empty_working_set(proc.pid)
+                        _demoted_hogs.add(proc)
+            except (psutil.NoSuchProcess, psutil.AccessDenied, AttributeError, KeyError):
                 continue
     else:
-        # Resume previously suspended hogs
-        for pid in list(_suspended_hogs):
+        # Restore previously demoted hogs
+        for proc in list(_demoted_hogs):
             try:
-                proc = psutil.Process(pid)
-                if proc.status() == psutil.STATUS_STOPPED:
-                    proc.resume()
+                if proc.is_running():
+                    if proc.nice() != NORMAL_PRIORITY:
+                        proc.nice(NORMAL_PRIORITY)
             except (psutil.NoSuchProcess, psutil.AccessDenied):
                 pass
-        _suspended_hogs.clear()
+        _demoted_hogs.clear()
 
-def resume_all(active_instances=None):
+def restore_all(active_instances=None):
     """
-    Resumes all tracked instances and any collateral hogs that were suspended.
+    Restores all tracked instances and any collateral hogs that were demoted.
     """
-    global _suspended_hogs
+    global _demoted_hogs
+    NORMAL_PRIORITY = getattr(psutil, 'NORMAL_PRIORITY_CLASS', 32)
     
-    # 1. Resume tracked instances
+    # 1. Restore tracked instances
     if active_instances:
         for ctx in active_instances.values():
             try:
                 proc = ctx['proc']
-                if proc.is_running() and proc.status() == psutil.STATUS_STOPPED:
-                    proc.resume()
+                if proc.is_running():
+                    if proc.nice() != NORMAL_PRIORITY:
+                        proc.nice(NORMAL_PRIORITY)
             except (psutil.NoSuchProcess, psutil.AccessDenied, AttributeError):
                 pass
             
-    # 2. Resume collateral hogs
-    for pid in list(_suspended_hogs):
+    # 2. Restore collateral hogs
+    for proc in list(_demoted_hogs):
         try:
-            proc = psutil.Process(pid)
-            if proc.is_running() and proc.status() == psutil.STATUS_STOPPED:
-                proc.resume()
+            if proc.is_running():
+                if proc.nice() != NORMAL_PRIORITY:
+                    proc.nice(NORMAL_PRIORITY)
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             pass
-    _suspended_hogs.clear()
+    _demoted_hogs.clear()
 
-def render_ui(metrics=None, storage_metrics=None, vram_metrics=None, system_cpu=None, state=NORMAL, warning_msg="", instances=None):
+def render_ui(metrics=None, storage_metrics=None, vram_metrics=None, system_cpu=None, state=NORMAL, warning_msg="", instances=None, global_warning=None):
     WIDTH = 80
     border_line = f"{CYAN}+{'='*(WIDTH-2)}+{RESET}"
     separator_line = f"{CYAN}| {'-'*(WIDTH-4)} |{RESET}"
@@ -534,11 +558,22 @@ def render_ui(metrics=None, storage_metrics=None, vram_metrics=None, system_cpu=
     lines.append(border_line)
     
     # GLOBAL SYSTEM METRICS
-    if storage_metrics:
+    if storage_metrics or global_warning:
         lines.append(format_line(f"{WHITE}GLOBAL SYSTEM METRICS{RESET}", align='center'))
-        for drive in sorted(storage_metrics.keys()):
-            data = storage_metrics[drive]
-            lines.append(format_line(draw_bar(f"DISK {drive}", data['utilization_percent'], 100, state=NORMAL)))
+        if storage_metrics:
+            for drive in sorted(storage_metrics.keys()):
+                data = storage_metrics[drive]
+                lines.append(format_line(draw_bar(f"DISK {drive}", data['utilization_percent'], 100, state=NORMAL)))
+        
+        if global_warning:
+            if storage_metrics:
+                lines.append(separator_line)
+            vis_len = len(ANSI_ESCAPE.sub('', global_warning))
+            if vis_len > 76:
+                lines.append(format_line(f"{YELLOW}{global_warning[:76]}{RESET}", align='center'))
+                lines.append(format_line(f"{YELLOW}{global_warning[76:]}{RESET}", align='center'))
+            else:
+                lines.append(format_line(f"{YELLOW}{global_warning}{RESET}", align='center'))
         lines.append(border_line)
 
     if instances is None:
@@ -599,7 +634,16 @@ def render_ui(metrics=None, storage_metrics=None, vram_metrics=None, system_cpu=
                 elif i_vram['total_gb'] > 0 and (i_vram['used_gb'] / i_vram['total_gb']) > 0.9:
                     vram_state = WARNING # ORANGE/YELLOW
                 
-                lines.append(format_line(draw_stacked_vram_bar(i_vram, state=vram_state)))
+                # Fetch PID specific VRAM from global metrics
+                pid_vram_gb = 0.0
+                if 'per_pid_vram_gb' in i_vram and i_pid in i_vram['per_pid_vram_gb']:
+                    pid_vram_gb = i_vram['per_pid_vram_gb'][i_pid]
+                
+                # Adapt metrics for draw_stacked_vram_bar
+                display_vram = i_vram.copy()
+                display_vram['process_vram_gb'] = pid_vram_gb
+                
+                lines.append(format_line(draw_stacked_vram_bar(display_vram, state=vram_state)))
                 
                 # SHARED GPU line
                 lines.append(format_line(draw_shared_vram_bar(shared_gb)))
@@ -677,43 +721,50 @@ def start_monitoring(target_script_name=None, threshold_gb=None, interval_s=None
     print(f"{CLEAR_LINE}{CYAN}Starting Vitals Watchdog. Searching for {target_display}...{RESET}")
     
     active_instances = {} # pid -> dict
+    vram_monitor = VRAMMonitor()
+    storage_monitor = StorageMonitor()
     
     try:
         while True:
-            # 1. Scan for new instances
-            current_procs = []
-            for t in targets:
-                current_procs.extend(vitals_core.find_processes(t))
+            # 1. High-Performance Unified Discovery pass (NO cmdline fetching here)
+            all_procs = list(psutil.process_iter(['pid', 'name']))
+            
+            # 2. Unified Window Scan (One pass for titles and responding states)
+            window_map = vitals_core.get_system_window_map()
+            
+            # Scan for new instances (Lazily fetch cmdline ONLY for python)
+            target_procs = vitals_core.find_processes(target_script_name or '3dsmax', all_procs)
+            if not target_script_name:
+                # Add default targets if none specified
+                target_procs.extend(vitals_core.find_processes('max_simulator', all_procs))
             
             # Deduplicate by PID
             seen_pids = set()
             unique_procs = []
-            for p in current_procs:
+            for p in target_procs:
                 if p.pid not in seen_pids:
                     unique_procs.append(p)
                     seen_pids.add(p.pid)
 
             for proc in unique_procs:
                 if proc.pid not in active_instances:
-                    vram_monitor = VRAMMonitor()
-                    vram_monitor.set_target_pid(proc.pid)
+                    # Fetch window title from our batch map
+                    win_info = window_map.get(proc.pid, {'title': None})
                     active_instances[proc.pid] = {
                         'proc': proc,
                         'tracker': MemoryTracker(),
                         'state': NORMAL,
-                        'vram_monitor': vram_monitor,
-                        'title': vitals_core.get_window_title(proc.pid),
+                        'title': win_info['title'],
                         'status_msg': None
                     }
                     clear_screen(full=True)
                     print(f"{CLEAR_LINE}{GREEN}Found process! Locking onto PID: {proc.pid}{RESET}")
             
-            # 2. Check for closed instances
+            # 3. Check for closed instances
             pids_to_remove = []
             for pid, ctx in active_instances.items():
                 if not ctx['proc'].is_running():
                     pids_to_remove.append(pid)
-                    ctx['vram_monitor'].stop()
                     
             for pid in pids_to_remove:
                 del active_instances[pid]
@@ -726,23 +777,32 @@ def start_monitoring(target_script_name=None, threshold_gb=None, interval_s=None
                 time.sleep(1)
                 continue
 
+            # Update VRAM monitor with current PIDs
+            vram_monitor.update_pids(active_instances.keys())
+
             system_cpu = psutil.cpu_percent(interval=None)
             system_ram_percent = psutil.virtual_memory().percent
-            storage_metrics = vitals_core.get_storage_metrics()
+            storage_metrics = storage_monitor.get_metrics()
             
-            # 3. VIP Detection & Orchestration
+            # 4. VIP Detection & Orchestration (Shared all_procs list)
             foreground_pid = vitals_core.get_foreground_pid()
-            manage_orchestration(active_instances, system_ram_percent, foreground_pid)
+            manage_orchestration(active_instances, system_ram_percent, foreground_pid, all_procs)
+
+            global_warning = None
+            if system_ram_percent > 80.0:
+                global_warning = "[INFO] Demoting and flushing memory for background tasks to protect active VIP render"
 
             instances_data = []
             has_critical = False
             critical_proc = None
             critical_ctx = None
             
+            # Fetch global VRAM metrics once per tick
+            vram_metrics = vram_monitor.get_metrics()
+
             for pid, ctx in list(active_instances.items()):
                 proc = ctx['proc']
                 tracker = ctx['tracker']
-                vram_monitor = ctx['vram_monitor']
                 current_state = ctx['state']
                 
                 metrics = vitals_core.get_process_metrics(proc)
@@ -751,7 +811,10 @@ def start_monitoring(target_script_name=None, threshold_gb=None, interval_s=None
                 
                 tracker.add_reading(metrics['memory_gb'])
                 
-                is_responding = vitals_core.is_process_responding(proc.pid)
+                # Instant check from batch window_map
+                win_info = window_map.get(pid, {'is_responding': True})
+                is_responding = win_info['is_responding']
+                
                 state, msg = determine_state(metrics, system_ram_percent, tracker, threshold_gb=threshold_gb, is_responding=is_responding)
                 
                 ctx['state'] = state
@@ -761,8 +824,6 @@ def start_monitoring(target_script_name=None, threshold_gb=None, interval_s=None
                     critical_proc = proc
                     critical_ctx = ctx
 
-                vram_metrics = vram_monitor.get_metrics()
-                
                 instances_data.append({
                     'pid': pid,
                     'title': ctx['title'],
@@ -780,7 +841,8 @@ def start_monitoring(target_script_name=None, threshold_gb=None, interval_s=None
             ui_output = render_ui(
                 storage_metrics=storage_metrics,
                 system_cpu=system_cpu,
-                instances=instances_data
+                instances=instances_data,
+                global_warning=global_warning
             )
             clear_screen()
             print(ui_output)
@@ -812,7 +874,6 @@ def start_monitoring(target_script_name=None, threshold_gb=None, interval_s=None
                         print(f"\n{CLEAR_LINE}{GREEN}Process {critical_proc.pid} terminated.{RESET}")
                     except (psutil.NoSuchProcess, psutil.AccessDenied):
                         pass
-                    critical_ctx['vram_monitor'].stop()
                     if critical_proc.pid in active_instances:
                         del active_instances[critical_proc.pid]
                     time.sleep(2)
@@ -826,16 +887,16 @@ def start_monitoring(target_script_name=None, threshold_gb=None, interval_s=None
                 
             time.sleep(interval_s)
     finally:
-        resume_all(active_instances)
-        for ctx in active_instances.values():
-            ctx['vram_monitor'].stop()
+        restore_all(active_instances)
+        vram_monitor.stop()
+        storage_monitor.stop()
 
 def main():
     try:
         args = parse_args()
         start_monitoring(args.target, args.threshold, args.interval)
     except KeyboardInterrupt:
-        resume_all()
+        restore_all()
         clear_screen(full=True)
         print(f"{CLEAR_LINE}[INFO] Monitoring terminated by user. Exiting...")
         sys.exit(0)
