@@ -52,35 +52,5 @@ class TestVitalsCore(unittest.TestCase):
         self.assertEqual(metrics['memory_gb'], 1.0)
         self.assertEqual(metrics['cpu_percent'], 15.5)
 
-class TestCleanTitle(unittest.TestCase):
-
-    def test_strips_any_autodesk_year(self):
-        """Regex strips Autodesk 3ds Max suffix for any year, including future releases."""
-        self.assertEqual(vitals_core.clean_title("scene.max - Autodesk 3ds Max 2025"), "scene.max")
-        self.assertEqual(vitals_core.clean_title("scene.max - Autodesk 3ds Max 2026"), "scene.max")
-        self.assertEqual(vitals_core.clean_title("scene.max - Autodesk 3ds Max 2030"), "scene.max")
-
-    def test_strips_known_versions(self):
-        """Backward-compatible: known years 2022-2024 still stripped."""
-        self.assertEqual(vitals_core.clean_title("untitled - Autodesk 3ds Max 2024"), "untitled")
-        self.assertEqual(vitals_core.clean_title("untitled - Autodesk 3ds Max 2022"), "untitled")
-
-    def test_strips_bare_3ds_max_suffix(self):
-        """'- 3ds Max' suffix without Autodesk brand also stripped."""
-        self.assertEqual(vitals_core.clean_title("scene - 3ds Max"), "scene")
-
-    def test_truncates_long_titles(self):
-        result = vitals_core.clean_title("A" * 50, max_length=40)
-        self.assertEqual(len(result), 40)
-        self.assertTrue(result.endswith("..."))
-
-    def test_empty_and_none(self):
-        self.assertEqual(vitals_core.clean_title(""), "")
-        self.assertEqual(vitals_core.clean_title(None), "")
-
-    def test_leaves_non_max_title_unchanged(self):
-        self.assertEqual(vitals_core.clean_title("Slate Material Editor"), "Slate Material Editor")
-
-
 if __name__ == '__main__':
     unittest.main()

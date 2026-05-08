@@ -6,7 +6,7 @@ from unittest.mock import patch
 # Add the root directory to sys.path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from vitals import draw_bar, draw_stacked_ram_bar, draw_stacked_cpu_bar, render_ui, clear_screen
+from vitals import draw_bar, render_ui, clear_screen
 
 class TestVitalsUI(unittest.TestCase):
     def setUp(self):
@@ -16,7 +16,7 @@ class TestVitalsUI(unittest.TestCase):
         self.YELLOW = "\033[33m"
         self.ORANGE = "\033[38;5;208m"
         self.RED = "\033[31m"
-        self.RED_BLINK = "\033[1;31m"
+        self.RED_BLINK = "\033[1;5;31m"
 
     def test_get_usage_color(self):
         from vitals import get_usage_color
@@ -77,7 +77,6 @@ class TestVitalsUI(unittest.TestCase):
         self.assertTrue(found_cyan)
 
     def test_render_ui_shared_gpu_line(self):
-        """Shared GPU spillage appears in the unified GPU bar, not a separate bar."""
         from vitals import NORMAL
         metrics = {'cpu_percent': 10.0, 'memory_gb': 1.0}
         vram_metrics = {
@@ -86,15 +85,10 @@ class TestVitalsUI(unittest.TestCase):
             'shared_used_gb': 0.5
         }
         output = render_ui(metrics, vram_metrics=vram_metrics, state=NORMAL)
-        # Unified bar is present
-        self.assertIn("VRAM [GPU]", output)
-        # Shared annotation shown in suffix
-        self.assertIn("+0.5GB", output)
-        # Overflow warning line still fires
-        self.assertIn("!!! GPU MEMORY OVERFLOW INTO SYSTEM RAM !!!", output)
+        self.assertIn("SHARED GPU", output)
+        self.assertIn("0.50 GB", output)
+        self.assertIn("!!! WARNING: SHARED GPU MEMORY SPILLAGE !!!", output)
         self.assertIn(self.RED_BLINK, output)
-        # Old separate bar no longer rendered
-        self.assertNotIn("SHARED GPU", output)
 
     @patch('os.system')
     @patch('sys.stdout.write')
@@ -146,25 +140,23 @@ class TestVitalsUI(unittest.TestCase):
         from vitals import NORMAL
         metrics = {'cpu_percent': 10.0, 'memory_gb': 1.0}
         output = render_ui(metrics, state=NORMAL)
-
+        
         # Check for borders
         self.assertIn(self.CYAN, output)
+        self.assertIn("=" * 60, output)
         # Check for normal status
-        self.assertIn("[ ~ ]  monitoring active", output)
+        self.assertIn("[ STATUS: MONITORING ACTIVE ]", output)
         # Should not have spike warning
         self.assertNotIn("!!! CRITICAL: RUNAWAY MEMORY LEAK !!!", output)
 
     def test_render_ui_warning(self):
         from vitals import WARNING
         metrics = {'cpu_percent': 10.0, 'memory_gb': 2.0}
-        # Pass a message that contains the RAM spike trigger phrase
-        output = render_ui(metrics, state=WARNING, warning_msg="Memory spike detected (>0.1GB in 2.0s)")
-
-        # Honest message: no "STABILIZING" claim
-        self.assertNotIn("STABILIZING RESOURCES", output)
-        # Trigger-derived label present
-        self.assertIn(self.YELLOW + "[ ! ] WARNING:", output)
-        self.assertIn("RAM spike", output)
+        output = render_ui(metrics, state=WARNING, warning_msg="Spike detected!")
+        
+        # Check for warning in Yellow
+        self.assertIn(self.YELLOW + "--- WARNING: STABILIZING RESOURCES ---", output)
+        self.assertIn("Spike detected!", output)
         self.assertIn(self.YELLOW, output)
 
     def test_render_ui_critical(self):
@@ -172,8 +164,9 @@ class TestVitalsUI(unittest.TestCase):
         metrics = {'cpu_percent': 10.0, 'memory_gb': 2.0}
         output = render_ui(metrics, state=CRITICAL, warning_msg="Runaway leak!")
         
-        # Check for critical warning in bold red
-        self.assertIn(self.RED_BLINK + "[ x ]  CRITICAL: system RAM exhausted", output)
+        # Check for critical warning in Red Blink
+        self.assertIn(self.RED_BLINK + "!!! CRITICAL: SYSTEM RAM EXHAUSTED !!!", output)
+        self.assertIn("Runaway leak!", output)
         self.assertIn(self.RED_BLINK, output)
 
     def test_render_ui_dynamic_cores(self):
@@ -187,12 +180,12 @@ class TestVitalsUI(unittest.TestCase):
                 'cpu_affinity': [2, 3] # Using 2 cores
             }
             output = render_ui(metrics, state=NORMAL)
-            self.assertIn("cores  2/16", output)
+            self.assertIn("[ CORES: 2/16  ]", output)
 
             # Change affinity to 4 cores
             metrics['cpu_affinity'] = [0, 1, 2, 3]
             output = render_ui(metrics, state=NORMAL)
-            self.assertIn("cores  4/16", output)
+            self.assertIn("[ CORES: 4/16  ]", output)
 
     def test_render_ui_ghosting_fix(self):
         """Verify that every line ends with the ANSI clear-line code \033[K."""
@@ -251,22 +244,18 @@ class TestVitalsUI(unittest.TestCase):
             self.assertEqual(len(label_part), 12, f"Label part '{label_part}' is not 12 chars")
 
     def test_simplified_borders(self):
-        """Verify header border has VITALS title; bottom border is solid = line."""
+        """Verify that borders are simplified (single solid line)."""
         from vitals import NORMAL
         metrics = {'cpu_percent': 10.0, 'memory_gb': 1.0}
         output = render_ui(metrics, state=NORMAL)
         lines = output.split('\n')
         plain_lines = [self.strip_ansi(line).strip() for line in lines if line.strip()]
-
+        
         top_border = plain_lines[0]
-        self.assertTrue(top_border.startswith('+'), f"Top border must start with +: {top_border}")
-        self.assertTrue(top_border.endswith('+'), f"Top border must end with +: {top_border}")
-        self.assertIn('VITALS', top_border, f"Top border must contain VITALS: {top_border}")
-
-        # The action footer is the last line; find the last actual border line
-        border_lines = [l for l in plain_lines if l.startswith('+') and l.endswith('+')]
-        self.assertTrue(len(border_lines) >= 1, "No border lines found")
-        self.assertTrue(all(c == '=' for c in border_lines[-1][1:-1]), f"Bottom border malformed: {border_lines[-1]}")
+        bottom_border = plain_lines[-1]
+        
+        self.assertTrue(all(c == '=' for c in top_border[1:-1]), f"Top border is not simplified: {top_border}")
+        self.assertTrue(all(c == '=' for c in bottom_border[1:-1]), f"Bottom border is not simplified: {bottom_border}")
 
     def test_status_matrix_color(self):
         from vitals import NORMAL
@@ -279,7 +268,7 @@ class TestVitalsUI(unittest.TestCase):
         with patch('psutil.cpu_count', return_value=8):
             output = render_ui(metrics, state=NORMAL)
             # 32 -> Normal, 2 cores out of 8 -> 2/8
-            expected_matrix = f"{self.CYAN}priority  {'Normal':<12}  cores  {'2/8':<7}        {self.RESET}"
+            expected_matrix = f"{self.CYAN}[ PRIORITY: Normal       ] [ CORES: 2/8   ]{self.RESET}"
             self.assertIn(expected_matrix, output)
 
     def test_status_matrix_fixed_width(self):
@@ -290,10 +279,10 @@ class TestVitalsUI(unittest.TestCase):
         output1 = render_ui(metrics1, state=NORMAL)
         output2 = render_ui(metrics2, state=NORMAL)
         
-        matrix1 = [self.strip_ansi(line) for line in output1.split('\n') if 'priority  ' in self.strip_ansi(line)][0]
-        matrix2 = [self.strip_ansi(line) for line in output2.split('\n') if 'priority  ' in self.strip_ansi(line)][0]
-
-        self.assertEqual(matrix1.find('cores  '), matrix2.find('cores  '))
+        matrix1 = [self.strip_ansi(line) for line in output1.split('\n') if '[ PRIORITY:' in self.strip_ansi(line)][0]
+        matrix2 = [self.strip_ansi(line) for line in output2.split('\n') if '[ PRIORITY:' in self.strip_ansi(line)][0]
+        
+        self.assertEqual(matrix1.find('] [ CORES:'), matrix2.find('] [ CORES:'))
         self.assertEqual(len(matrix1), len(matrix2))
 
     def test_vertical_stabilization_line_count(self):
@@ -391,9 +380,9 @@ class TestVitalsUI(unittest.TestCase):
             'shared_used_gb': 0.5
         }
         output = render_ui(metrics, vram_metrics=vram_metrics, state=NORMAL)
-
-        # Unified overflow warning in RED_BLINK
-        expected_warning = f"{RED_BLINK}!!! GPU MEMORY OVERFLOW INTO SYSTEM RAM !!!{RESET}"
+        
+        # Check for spillage warning in RED_BLINK
+        expected_warning = f"{RED_BLINK}!!! WARNING: SHARED GPU MEMORY SPILLAGE !!!{RESET}"
         self.assertIn(expected_warning, output)
 
     def test_global_metrics_section(self):
@@ -402,14 +391,21 @@ class TestVitalsUI(unittest.TestCase):
         storage_metrics = {'C': {'utilization_percent': 20.0}}
         output = render_ui(metrics, storage_metrics=storage_metrics, state=NORMAL)
         
+        # Should have GLOBAL SYSTEM METRICS header
+        self.assertIn("GLOBAL SYSTEM METRICS", output)
+        
         # DISK C should be present
         self.assertIn("DISK C", output)
-
-        # Disk section must appear before the process CPU bar
+        
+        # Instance header should be AFTER global metrics
+        global_idx = output.find("GLOBAL SYSTEM METRICS")
         disk_idx = output.find("DISK C")
-        cpu_idx  = output.find("CPU")
-        self.assertLess(disk_idx, cpu_idx,
-                        f"DISK must come before CPU: Disk({disk_idx}) < CPU({cpu_idx})")
+        inst_idx = output.find("INSTANCE") # In render_ui, it's added if pid is not None
+        
+        # For this test, pid is None, so let's use another marker like CPU bar
+        cpu_idx = output.find("CPU")
+        
+        self.assertTrue(global_idx < disk_idx < cpu_idx, f"Ordering failed: Global({global_idx}) < Disk({disk_idx}) < CPU({cpu_idx})")
 
     def test_render_ui_instance_symmetry(self):
         from vitals import NORMAL
@@ -435,102 +431,6 @@ class TestVitalsUI(unittest.TestCase):
             plain_line = self.strip_ansi(line)
             if plain_line:
                 self.assertEqual(len(plain_line), 80, f"Line width is not 80: '{plain_line}' (len={len(plain_line)})")
-
-class TestBarSuffixes(unittest.TestCase):
-    """Verify that bar suffix lines show the right numbers for quick-glance reading."""
-
-    def strip_ansi(self, text):
-        import re
-        return re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])').sub('', text)
-
-    def test_ram_bar_shows_process_gb(self):
-        """RAM bar suffix includes the process GB so artist can see 3ds Max's footprint."""
-        with patch('psutil.virtual_memory') as mock_vm:
-            mock_vm.return_value.total = 16 * 1024 ** 3
-            mock_vm.return_value.used = 10 * 1024 ** 3
-            plain = self.strip_ansi(draw_stacked_ram_bar(8.0))
-        # target_gb=8.0 and total_gb=16.0 should appear in the suffix
-        self.assertIn('8.0', plain)
-        self.assertIn('16', plain)
-        self.assertIn('GB', plain)
-
-    def test_ram_bar_suffix_fits_width(self):
-        """RAM bar visible length stays within 76 chars (enforced by format_line)."""
-        with patch('psutil.virtual_memory') as mock_vm:
-            mock_vm.return_value.total = 256 * 1024 ** 3
-            mock_vm.return_value.used = 200 * 1024 ** 3
-            plain = self.strip_ansi(draw_stacked_ram_bar(180.0))
-        self.assertLessEqual(len(plain), 76)
-
-    def test_cpu_bar_shows_process_percent(self):
-        """CPU bar suffix shows both process % and system % to eliminate ambiguity."""
-        plain = self.strip_ansi(draw_stacked_cpu_bar(12.5, system_cpu_percent=45.0))
-        self.assertIn('12.5', plain)
-        self.assertIn('45.0', plain)
-
-    def test_cpu_bar_suffix_fits_width(self):
-        plain = self.strip_ansi(draw_stacked_cpu_bar(99.9, system_cpu_percent=99.9))
-        self.assertLessEqual(len(plain), 76)
-
-    def test_disk_bar_shows_mb_s(self):
-        """Disk section in render_ui shows MB/s throughput when metric is present."""
-        from vitals import NORMAL
-        metrics = {'cpu_percent': 10.0, 'memory_gb': 1.0}
-        storage_metrics = {'C': {'utilization_percent': 20.0, 'mb_s': 23.4}}
-        output = render_ui(metrics, storage_metrics=storage_metrics, state=NORMAL)
-        self.assertIn('23.4', output)
-        self.assertIn('MB/s', output)
-
-    def test_disk_bar_zero_mb_s_fallback(self):
-        """Disk bar renders without mb_s key (backward compat with old metric dict)."""
-        from vitals import NORMAL
-        metrics = {'cpu_percent': 10.0, 'memory_gb': 1.0}
-        storage_metrics = {'C': {'utilization_percent': 20.0}}
-        output = render_ui(metrics, storage_metrics=storage_metrics, state=NORMAL)
-        self.assertIn('MB/s', output)  # header always present
-        self.assertIn('DISK C', output)
-
-
-class TestActionFooter(unittest.TestCase):
-    def strip_ansi(self, text):
-        import re
-        return re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])').sub('', text)
-
-    def test_footer_present_in_render_ui(self):
-        """render_ui always outputs an action footer as its last line."""
-        from vitals import NORMAL
-        metrics = {'cpu_percent': 10.0, 'memory_gb': 1.0}
-        output = render_ui(metrics, state=NORMAL)
-        plain_lines = [self.strip_ansi(l) for l in output.split('\n') if self.strip_ansi(l).strip()]
-        last = plain_lines[-1]
-        # Footer contains key hints
-        self.assertIn('F:', last)
-        self.assertIn('B:', last)
-        self.assertIn('Q:', last)
-
-    def test_footer_width_80(self):
-        """Footer line is exactly 80 visible characters wide."""
-        from vitals import NORMAL
-        metrics = {'cpu_percent': 10.0, 'memory_gb': 1.0}
-        output = render_ui(metrics, state=NORMAL)
-        plain_lines = [self.strip_ansi(l) for l in output.split('\n') if self.strip_ansi(l).strip()]
-        self.assertEqual(len(plain_lines[-1]), 80)
-
-    def test_footer_shows_feedback_when_provided(self):
-        """When a feedback_msg is passed, it replaces the default footer text."""
-        from vitals import NORMAL
-        metrics = {'cpu_percent': 10.0, 'memory_gb': 1.0}
-        output = render_ui(metrics, state=NORMAL, feedback_msg="[ACTION] Flushed 1.4 GB")
-        self.assertIn("Flushed 1.4 GB", output)
-
-    def test_ghosting_still_cleared(self):
-        """Every line (including new footer) ends with the ANSI clear-line code."""
-        from vitals import NORMAL
-        metrics = {'cpu_percent': 10.0, 'memory_gb': 1.0}
-        output = render_ui(metrics, state=NORMAL)
-        for i, line in enumerate(output.split('\n')):
-            self.assertTrue(line.endswith("\033[K"), f"Line {i} missing clear-line: {line!r}")
-
 
 if __name__ == '__main__':
     unittest.main()

@@ -34,17 +34,17 @@ class TestOrchestrator(unittest.TestCase):
             other_pid: {'proc': other_proc, 'status_msg': None}
         }
         
-        # 2. High RAM case — must be above AGGRESSIVE_THRESHOLD (85.0, exclusive)
+        # 2. High RAM case
         all_procs = []
-        vitals.manage_orchestration(active_instances, 86.0, vip_pid, all_procs)
-
+        vitals.manage_orchestration(active_instances, 85.0, vip_pid, all_procs)
+        
         # Verify VIP elevation
         vip_proc.nice.assert_called_with(psutil.HIGH_PRIORITY_CLASS)
-        self.assertEqual(active_instances[vip_pid]['status_msg'], "VIP · HIGH PRIORITY")
-
+        self.assertEqual(active_instances[vip_pid]['status_msg'], "[ STATUS: VIP - HIGH PRIORITY ]")
+        
         # Verify Other demotion
         other_proc.nice.assert_called_with(psutil.IDLE_PRIORITY_CLASS)
-        self.assertEqual(active_instances[other_pid]['status_msg'], "DEMOTED TO RECLAIM RAM")
+        self.assertEqual(active_instances[other_pid]['status_msg'], "[ STATUS: DEMOTED TO RECLAIM RAM ]")
 
     @patch('psutil.process_iter')
     def test_orchestrator_normal_ram_behavior(self, mock_process_iter):
@@ -63,8 +63,8 @@ class TestOrchestrator(unittest.TestCase):
         other_proc.status.return_value = 'running'
         
         active_instances = {
-            vip_pid: {'proc': vip_proc, 'status_msg': "VIP · HIGH PRIORITY"},
-            other_pid: {'proc': other_proc, 'status_msg': "DEMOTED TO RECLAIM RAM"}
+            vip_pid: {'proc': vip_proc, 'status_msg': "[ STATUS: VIP - HIGH PRIORITY ]"},
+            other_pid: {'proc': other_proc, 'status_msg': "[ STATUS: DEMOTED TO RECLAIM RAM ]"}
         }
         
         # 2. Normal RAM case
@@ -94,9 +94,9 @@ class TestOrchestrator(unittest.TestCase):
         
         active_instances = {}
         
-        # High RAM — must be above AGGRESSIVE_THRESHOLD (85.0, exclusive)
+        # High RAM
         all_procs = [chrome_proc]
-        vitals.manage_orchestration(active_instances, 86.0, 0, all_procs)
+        vitals.manage_orchestration(active_instances, 85.0, 0, all_procs)
         chrome_proc.nice.assert_called_with(psutil.IDLE_PRIORITY_CLASS)
         
         # Simulate chrome_proc is now demoted

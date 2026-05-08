@@ -14,7 +14,7 @@ class TestVitalsUIV3(unittest.TestCase):
         self.CYAN = "\033[36m"
         self.GREEN = "\033[32m"
         self.YELLOW = "\033[33m"
-        self.RED_BLINK = "\033[1;31m"
+        self.RED_BLINK = "\033[1;5;31m"
         self.WHITE = "\033[37m"
         self.CLEAR_LINE = "\033[K"
 
@@ -53,7 +53,7 @@ class TestVitalsUIV3(unittest.TestCase):
         # Verify status matrix presence and formatting with CYAN color
         # 32 -> Normal
         # [2, 3, 4, 5] -> 4 cores out of 8
-        expected_matrix = f"{self.CYAN}priority  {'Normal':<12}  cores  {'4/8':<7}        {self.RESET}"
+        expected_matrix = f"{self.CYAN}[ PRIORITY: Normal       ] [ CORES: 4/8   ]{self.RESET}"
         self.assertIn(expected_matrix, output)
 
     @patch('psutil.cpu_count')
@@ -70,7 +70,7 @@ class TestVitalsUIV3(unittest.TestCase):
         
         # 64 -> Idle
         # [0, 1] -> 2 cores out of 16
-        expected_matrix = f"{self.CYAN}priority  {'Idle':<12}  cores  {'2/16':<7}        {self.RESET}"
+        expected_matrix = f"{self.CYAN}[ PRIORITY: Idle         ] [ CORES: 2/16  ]{self.RESET}"
         self.assertIn(expected_matrix, output)
 
 if __name__ == '__main__':

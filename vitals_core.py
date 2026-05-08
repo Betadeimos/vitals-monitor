@@ -1,14 +1,8 @@
 import psutil
-import re
 import time
 import os
 import sys
 import subprocess
-
-_MAX_TITLE_RE = re.compile(
-    r'\s*-\s*(?:Autodesk\s+)?3ds\s*Max(?:\s+\d{4})?\s*$',
-    re.IGNORECASE,
-)
 
 # Windows-only imports for hung state detection
 try:
@@ -260,11 +254,22 @@ def get_foreground_pid():
         return None
 
 def clean_title(title, max_length=40):
+    """
+    Strips common 3ds Max suffixes and truncates the title to max_length.
+    """
     if not title:
         return ""
-    cleaned = _MAX_TITLE_RE.sub('', title).strip()
+    
+    suffixes = [" - Autodesk 3ds Max 2024", " - Autodesk 3ds Max 2023", " - Autodesk 3ds Max 2022", " - 3ds Max"]
+    cleaned = title
+    for suffix in suffixes:
+        if cleaned.endswith(suffix):
+            cleaned = cleaned[:-len(suffix)]
+            break
+            
     if len(cleaned) > max_length:
-        cleaned = cleaned[:max_length - 3] + "..."
+        cleaned = cleaned[:max_length-3] + "..."
+        
     return cleaned
 
 def find_processes(target_script_name, all_procs):
@@ -350,22 +355,11 @@ def get_storage_metrics():
     except Exception:
         return {"C": {"utilization_percent": 0.0}, "D": {"utilization_percent": 0.0}}
 
-    # Discover all local fixed drives dynamically
-    drive_letters = []
-    for part in psutil.disk_partitions():
-        if 'fixed' in part.opts.lower() or part.fstype:
-            letter = part.mountpoint.rstrip('\\').rstrip('/')
-            if len(letter) == 2 and letter[1] == ':':
-                drive_letters.append(letter[0].upper())
-    if not drive_letters:
-        drive_letters = ["C"]
-
     metrics = {}
-    for letter in drive_letters:
+    for letter in ["C", "D"]:
         p_name = get_physical_drive_name(letter + ":")
         io_key = p_name if p_name in io1 else (letter + ":" if (letter + ":") in io1 else None)
         util = 0.0
-        mb_s = 0.0
         if io_key:
             c1, c2 = io1[io_key], io2[io_key]
             b1 = getattr(c1, 'busy_time', c1.read_time + c1.write_time)
@@ -373,17 +367,17 @@ def get_storage_metrics():
             # busy_time might be mocked or missing
             if not isinstance(b1, (int, float)): b1 = c1.read_time + c1.write_time
             if not isinstance(b2, (int, float)): b2 = c2.read_time + c2.write_time
-
+            
             dbusy_ms = b2 - b1
             util = (dbusy_ms / (dt_s * 1000)) * 100
-
+            
             bytes_moved = (c2.read_bytes + c2.write_bytes) - (c1.read_bytes + c1.write_bytes)
             if bytes_moved > 0:
                 mb_s = (bytes_moved / (1024 * 1024)) / dt_s
-                synthetic_util = mb_s * 10
+                synthetic_util = mb_s * 10 
                 util = max(util, min(synthetic_util, 100.0))
-
-        metrics[letter] = {'utilization_percent': round(min(max(util, 0.0), 100.0), 1), 'mb_s': round(mb_s, 2)}
+        
+        metrics[letter] = {'utilization_percent': round(min(max(util, 0.0), 100.0), 1)}
     return metrics
 
 def get_vram_metrics(pids=None):

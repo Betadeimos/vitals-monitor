@@ -34,27 +34,27 @@ class TestTaskRequirements(unittest.TestCase):
         output = render_ui(instances=instances)
         plain_output = self.strip_ansi(output)
         
-        # Find the instance header line — format is "| > 1234  {title} ... |"
-        header_line = [line for line in plain_output.split('\n') if "> 1234" in line][0]
-
-        # Check suffix is stripped
+        # Find the instance header line
+        header_line = [line for line in plain_output.split('\n') if "INSTANCE: PID 1234" in line][0]
+        
+        # Check if suffix is stripped
         self.assertNotIn("Autodesk 3ds Max 2024", header_line)
         self.assertNotIn("3ds Max", header_line)
-
-        # Check for ellipsis (title was truncated)
+        
+        # Check for ellipsis
         self.assertIn("...", header_line)
-
+        
         # Check overall line length
         self.assertEqual(len(header_line.strip()), 80)
-
-        # Title starts after "> 1234  " and ends before the trailing padding + "|"
-        pid_marker = "> 1234  "
-        title_start = header_line.find(pid_marker) + len(pid_marker)
-        title_raw = header_line[title_start:].rstrip()
-        # Strip the trailing " |" border
-        if title_raw.endswith("|"):
-            title_raw = title_raw[:-1].rstrip()
-        self.assertLessEqual(len(title_raw), 40)
+        
+        # Extract title from header_line: "| INSTANCE: PID 1234 [Title] |"
+        # PID 1234 is 4 digits. "INSTANCE: PID " is 14 chars. 
+        # Total "INSTANCE: PID 1234 [" is 20 chars.
+        title_start = header_line.find("[") + 1
+        title_end = header_line.rfind("]")
+        title = header_line[title_start:title_end]
+        
+        self.assertLessEqual(len(title), 40)
 
     def test_status_msg_routing(self):
         # Test that status_msg is displayed in the UI instead of defaulting to MONITORING ACTIVE
@@ -81,7 +81,7 @@ class TestTaskRequirements(unittest.TestCase):
         }]
         
         output = render_ui(instances=instances)
-        self.assertIn("[ ~ ]  monitoring active", output)
+        self.assertIn("[ STATUS: MONITORING ACTIVE ]", output)
 
 if __name__ == '__main__':
     unittest.main()
