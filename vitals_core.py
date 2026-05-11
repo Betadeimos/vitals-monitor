@@ -234,6 +234,24 @@ def get_foreground_pid():
     except Exception:
         return None
 
+
+class _LASTINPUTINFO(ctypes.Structure):
+    _fields_ = [("cbSize", ctypes.c_uint), ("dwTime", ctypes.c_uint)]
+
+def get_last_input_tick():
+    """Return dwTime from GetLastInputInfo (ms since boot). 0 on failure or non-Windows."""
+    if os.name != 'nt' or ctypes is None:
+        return 0
+    try:
+        lii = _LASTINPUTINFO()
+        lii.cbSize = ctypes.sizeof(_LASTINPUTINFO)
+        if ctypes.windll.user32.GetLastInputInfo(ctypes.byref(lii)):
+            return lii.dwTime
+    except Exception:
+        pass
+    return 0
+
+
 def clean_title(title, max_length=40):
     """
     Strips common 3ds Max suffixes and truncates the title to max_length.

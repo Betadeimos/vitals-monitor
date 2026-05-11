@@ -416,11 +416,16 @@ class TestVitalsUI(unittest.TestCase):
         ]
         storage_metrics = {'C': {'utilization_percent': 20.0}}
         output = render_ui(storage_metrics=storage_metrics, instances=instances)
-        
-        # Count occurrences of "DISK C" - should be 1
+
+        # Global metrics appear once
         self.assertEqual(output.count("DISK C"), 1)
-        # Count occurrences of "CPU" - should be 2
-        self.assertEqual(output.count("CPU"), 2)
+        # Only the main instance has a full CPU bar
+        self.assertEqual(output.count("CPU"), 1)
+        # Both instances are still represented somewhere
+        self.assertIn("PID 123", output)
+        self.assertIn("PID 456", output)
+        # The compact "OTHER INSTANCES" block is shown
+        self.assertIn("O T H E R", output)
 
     def test_ui_width_80(self):
         from vitals import NORMAL
@@ -491,6 +496,92 @@ class TestVitalsUI(unittest.TestCase):
         RESET = "\033[0m"
         expected_matrix = f"{CYAN}[ PRIORITY: Idle         ] [ CORES: 2/16  ]{RESET}"
         self.assertIn(expected_matrix, output)
+
+class TestMultiInstanceLayout(unittest.TestCase):
+    def strip_ansi(self, text):
+        import re
+        return re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])').sub('', text)
+
+    def test_single_instance_has_no_others_section(self):
+        from vitals import NORMAL
+        instances = [{'pid': 123, 'title': 'OnlyOne', 'metrics': {'cpu_percent': 10.0, 'memory_gb': 1.0}, 'state': NORMAL}]
+        output = render_ui(instances=instances)
+        self.assertNotIn("O T H E R", output)
+
+    def test_foreground_instance_becomes_main(self):
+        from vitals import NORMAL
+        instances = [
+            {'pid': 123, 'title': 'BG', 'metrics': {'cpu_percent': 10.0, 'memory_gb': 1.0}, 'state': NORMAL, 'is_foreground': False},
+            {'pid': 456, 'title': 'FG', 'metrics': {'cpu_percent': 20.0, 'memory_gb': 2.0}, 'state': NORMAL, 'is_foreground': True},
+        ]
+        output = render_ui(instances=instances)
+        # Main block header references PID 456
+        self.assertIn("INSTANCE: PID 456", output)
+        # PID 123 only appears in the compact block, after the OTHERS header
+        others_idx = output.find("O T H E R")
+        self.assertGreater(others_idx, 0)
+        self.assertIn("PID 123", output[others_idx:])
+
+    def test_only_one_full_block_with_many_instances(self):
+        from vitals import NORMAL
+        instances = [
+            {'pid': 100 + i, 'title': f'Inst{i}', 'metrics': {'cpu_percent': 10.0, 'memory_gb': 1.0}, 'state': NORMAL}
+            for i in range(5)
+        ]
+        output = render_ui(instances=instances)
+        # Only one full CPU bar regardless of how many instances
+        self.assertEqual(output.count("CPU"), 1)
+        # All other PIDs still listed
+        for i in range(1, 5):
+            self.assertIn(f"PID {100 + i}", output)
+
+    def test_others_cap_at_six_with_overflow_indicator(self):
+        from vitals import NORMAL
+        instances = [
+            {'pid': 100 + i, 'title': f'I{i}', 'metrics': {'cpu_percent': 1.0, 'memory_gb': 1.0}, 'state': NORMAL}
+            for i in range(10)
+        ]
+        output = self.strip_ansi(render_ui(instances=instances))
+        # 1 main + 6 visible others = 7 PIDs visible; remaining 3 hidden
+        self.assertIn("and 3 more", output)
+
+
+class TestAwayState(unittest.TestCase):
+    def strip_ansi(self, text):
+        import re
+        return re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])').sub('', text)
+
+    def _stats(self, active):
+        return {
+            "week_start": "2026-05-11",
+            "working_s": 100.0, "hanging_s": 10.0, "rendering_s": 20.0,
+            "idle_s": 50.0, "billable_s": 110.0, "active_s": 130.0, "total_s": 180.0,
+            "crash_count": 0, "session_count": 1,
+            "active": active,
+        }
+
+    def test_stats_box_idle_bar_present(self):
+        from vitals import _render_stats_box
+        result = self.strip_ansi(_render_stats_box(self._stats("working")))
+        self.assertIn("IDLE", result)
+
+    def test_stats_box_idle_marker_when_idle_active(self):
+        from vitals import _render_stats_box
+        result = self.strip_ansi(_render_stats_box(self._stats("idle")))
+        self.assertIn("> IDLE", result)
+
+    def test_stats_box_shows_paused_notice_when_away(self):
+        from vitals import _render_stats_box
+        result = self.strip_ansi(_render_stats_box(self._stats("away")))
+        self.assertIn("TRACKING PAUSED", result)
+
+    def test_stats_box_no_active_marker_when_away(self):
+        from vitals import _render_stats_box
+        result = self.strip_ansi(_render_stats_box(self._stats("away")))
+        self.assertNotIn("> WORKING", result)
+        self.assertNotIn("> HUNG", result)
+        self.assertNotIn("> IDLE", result)
+
 
 if __name__ == '__main__':
     unittest.main()

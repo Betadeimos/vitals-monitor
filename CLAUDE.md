@@ -47,10 +47,11 @@ python vitals_doctor.py
 7. **Tick classification** (priority order — also the order of the `>` indicator in the UI):
    - HUNG (any instance not responding)
    - rendering (CPU > threshold, or title contains "rendering")
+   - away (idle continuously for > `idle_cutoff_seconds`; `record_tick` is skipped — no time recorded)
    - idle (no Max foreground for `idle_threshold_seconds`, OR outside work hours)
    - working
-8. `stats_tracker.record_tick(...)` accumulates seconds into the current week's bucket.
-9. `render_ui(...)` emits the stacked-bar dashboard, session tracker box, and time-breakdown box.
+8. `stats_tracker.record_tick(...)` accumulates seconds into the current week's bucket. Skipped when `away`.
+9. `render_ui(...)` emits the stacked-bar dashboard and session tracker box. With multiple Max instances open, only the foreground instance gets the full block; others collapse into a compact `O T H E R   I N S T A N C E S` section (1 line each, capped at 6 with "+N more"), so the dashboard size stays roughly constant.
 10. On CRITICAL (system RAM > 90%) → prompt to kill (Y) or clear spike history (N).
 11. On process exit while last state was HUNG/CRITICAL → `record_exit` increments crash count.
 
@@ -69,7 +70,7 @@ python vitals_doctor.py
 
 - `tier1` — CPU and RAM-spike thresholds.
 - `tier2` — system-RAM CRITICAL threshold and window.
-- `monitoring` — `refresh_interval_seconds`, `vram_monitor_interval_seconds`, `memory_tracker_window_size_seconds`, `idle_threshold_seconds`.
+- `monitoring` — `refresh_interval_seconds`, `vram_monitor_interval_seconds`, `memory_tracker_window_size_seconds`, `idle_threshold_seconds`, `idle_cutoff_seconds` (seconds of continuous idle before tracking pauses entirely; default 300).
 - `schedule` — `enabled`, `work_start_weekday/hour`, `work_end_weekday/hour`. Outside this window, ticks count as idle.
 
 ## Stats persistence (`vitals_stats.json`)
@@ -97,7 +98,7 @@ Keys are ISO Monday-of-week strings. Old weeks are **never** deleted — the UI 
 
 Tests live in `tests/`. Windows-only ctypes are mocked so the suite runs on any platform.
 
-Current suite: 123 tests, all passing.
+Current suite: 134 tests, all passing.
 
 ## Development mandates
 

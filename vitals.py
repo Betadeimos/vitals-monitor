@@ -35,7 +35,8 @@ DEFAULT_CONFIG = {
         "refresh_interval_seconds": 0.5,
         "vram_monitor_interval_seconds": 2.0,
         "memory_tracker_window_size_seconds": 5.0,
-        "idle_threshold_seconds": 5.0
+        "idle_threshold_seconds": 5.0,
+        "idle_cutoff_seconds": 300.0
     },
     "schedule": {
         "enabled": True,
@@ -593,29 +594,34 @@ def _render_stats_box(summary):
     except (ValueError, KeyError):
         ws = summary.get("week_start", "")
 
-    billable = summary["billable_s"]
+    total_s  = summary["total_s"]
     sessions = summary["session_count"]
     crashes  = summary["crash_count"]
-    active   = summary.get("active")
+    cur      = summary.get("active")
 
     lines = [
         border,
         fline(f"{WHITE}S E S S I O N   T R A C K E R{RESET}", align="center"),
         fline(f"{CYAN}week of {ws}  |  {sessions} session{'s' if sessions != 1 else ''}{RESET}", align="center"),
         sep,
-        fline(_draw_stats_bar("WORKING", summary["working_s"], billable, GREEN, active=(active == "working"))),
-        fline(_draw_stats_bar("HUNG",    summary["hanging_s"], billable, RED,   active=(active == "hanging"))),
-        sep,
+        fline(_draw_stats_bar("WORKING", summary["working_s"], total_s, GREEN, active=(cur == "working"))),
+        fline(_draw_stats_bar("HUNG",    summary["hanging_s"], total_s, RED,   active=(cur == "hanging"))),
+        fline(_draw_stats_bar("IDLE",    summary["idle_s"],    total_s, CYAN,  active=(cur == "idle"))),
     ]
 
-    render_mark = f"{YELLOW}>{RESET}" if active == "rendering" else " "
+    if cur == "away":
+        lines.append(fline(f"{YELLOW}[ TRACKING PAUSED — focus Max to resume ]{RESET}", align="center"))
+    else:
+        lines.append(sep)
+
+    render_mark = f"{YELLOW}>{RESET}" if cur == "rendering" else " "
     render_str = f"{render_mark} render: {_fmt_duration(summary['rendering_s'])}"
     crash_str  = f"crashes: {crashes}"
-    total_str  = f"tracked: {_fmt_duration(summary['total_s'])}"
+    active_str = f"active: {_fmt_duration(summary['active_s'])}"
     inner = WIDTH - 4
     vis_render = len(ANSI_ESCAPE.sub("", render_str))
-    gap1 = max(2, (inner - vis_render - len(crash_str) - len(total_str)) // 2)
-    info_line = f"{WHITE}{render_str}{' ' * gap1}{crash_str}{' ' * gap1}{total_str}{RESET}"
+    gap1 = max(2, (inner - vis_render - len(crash_str) - len(active_str)) // 2)
+    info_line = f"{WHITE}{render_str}{' ' * gap1}{crash_str}{' ' * gap1}{active_str}{RESET}"
     lines.append(fline(info_line))
 
     at = summary.get("all_time")
@@ -624,7 +630,8 @@ def _render_stats_box(summary):
             f"{CYAN}all-time:{RESET}  "
             f"{GREEN}work {_fmt_duration(at['working_s'])}{RESET}  "
             f"{RED}hung {_fmt_duration(at['hanging_s'])}{RESET}  "
-            f"{WHITE}sessions {at['session_count']}  crashes {at['crash_count']}{RESET}"
+            f"{CYAN}idle {_fmt_duration(at['idle_s'])}{RESET}  "
+            f"{WHITE}s {at['session_count']}  c {at['crash_count']}{RESET}"
         )
         lines.append(sep)
         lines.append(fline(at_str, align="center"))
@@ -633,40 +640,33 @@ def _render_stats_box(summary):
     return "\n".join(line + CLEAR_LINE for line in lines)
 
 
-def _render_time_box(summary):
-    WIDTH = 80
-    border = f"{CYAN}+{'=' * (WIDTH - 2)}+{RESET}"
-    sep    = f"{CYAN}| {'-' * (WIDTH - 4)} |{RESET}"
 
-    def fline(content, align="left"):
-        vis = len(ANSI_ESCAPE.sub("", content))
-        pad = max(0, (WIDTH - 4) - vis)
-        if align == "center":
-            l, r = pad // 2, pad - pad // 2
-            return f"{CYAN}| {RESET}{' ' * l}{content}{' ' * r}{CYAN} |{RESET}"
-        return f"{CYAN}| {RESET}{content}{' ' * pad}{CYAN} |{RESET}"
+def _format_compact_instance(inst):
+    """One-line summary for a background Max instance."""
+    pid = inst.get('pid') or 0
+    clean = vitals_core.clean_title(inst.get('title'), max_length=20) or ''
+    title_str = f"[{clean}]" if clean else ""
+    metrics = inst.get('metrics') or {}
+    cpu = metrics.get('cpu_percent', 0.0)
+    ram = metrics.get('memory_gb', 0.0)
+    state = inst.get('state', NORMAL)
+    is_rendering = inst.get('is_rendering', False)
 
-    active = summary["active_s"]
-    idle   = summary["idle_s"]
-    total  = summary["total_s"]
-    cur    = summary.get("active")
+    if state == HUNG:
+        state_str = f"{RED_BLINK}HUNG{RESET}"
+    elif state == CRITICAL:
+        state_str = f"{RED_BLINK}Critical{RESET}"
+    elif state == WARNING:
+        state_str = f"{YELLOW}Warning{RESET}"
+    elif is_rendering:
+        state_str = f"{YELLOW}Render{RESET}"
+    else:
+        state_str = f"{GREEN}Normal{RESET}"
 
-    active_str = f"active: {_fmt_duration(active)}"
-    idle_str   = f"idle:   {_fmt_duration(idle)}"
-    inner = WIDTH - 4
-    gap = max(3, inner - len(active_str) - len(idle_str))
-    detail = f"{GREEN}{active_str}{' ' * gap}{CYAN}{idle_str}{RESET}"
-
-    lines = [
-        border,
-        fline(f"{WHITE}T I M E   B R E A K D O W N{RESET}", align="center"),
-        sep,
-        fline(_draw_stats_bar("IDLE", idle, total, CYAN, active=(cur == "idle"))),
-        sep,
-        fline(detail),
-        border,
-    ]
-    return "\n".join(line + CLEAR_LINE for line in lines)
+    cpu_color = get_usage_color(cpu)
+    left = f"  {CYAN}PID {pid:<6}{RESET}  {WHITE}{title_str:<22}{RESET}"
+    right = f"{cpu_color}{cpu:5.1f}%{RESET}   {WHITE}{ram:5.1f} GB{RESET}   {state_str}"
+    return f"{left}  {right}"
 
 
 def render_ui(metrics=None, storage_metrics=None, vram_metrics=None, system_cpu=None, state=NORMAL, warning_msg="", instances=None, global_warning=None, stats=None):
@@ -713,8 +713,18 @@ def render_ui(metrics=None, storage_metrics=None, vram_metrics=None, system_cpu=
 
     if instances is None:
         instances = [{'metrics': metrics, 'vram_metrics': vram_metrics, 'state': state, 'warning_msg': warning_msg, 'pid': None, 'title': None}]
-        
-    for idx, inst in enumerate(instances):
+
+    # Partition: foreground (or first) gets full detail; the rest collapse into compact lines.
+    if instances:
+        main_idx = next((i for i, inst in enumerate(instances) if inst.get('is_foreground')), 0)
+        main_inst = instances[main_idx]
+        others = [inst for i, inst in enumerate(instances) if i != main_idx]
+        others.sort(key=lambda x: x.get('pid') or 0)
+    else:
+        main_inst = None
+        others = []
+
+    for idx, inst in enumerate([main_inst] if main_inst else []):
         i_metrics = inst.get('metrics')
         i_vram = inst.get('vram_metrics')
         i_state = inst.get('state', NORMAL)
@@ -817,10 +827,21 @@ def render_ui(metrics=None, storage_metrics=None, vram_metrics=None, system_cpu=
         
         lines.append(border_line)
 
+    if others:
+        MAX_OTHERS_VISIBLE = 6
+        visible = others[:MAX_OTHERS_VISIBLE]
+        hidden = len(others) - len(visible)
+        lines.append(format_line(f"{WHITE}O T H E R   I N S T A N C E S{RESET}", align='center'))
+        lines.append(separator_line)
+        for o in visible:
+            lines.append(format_line(_format_compact_instance(o)))
+        if hidden > 0:
+            lines.append(format_line(f"{CYAN}  ... and {hidden} more{RESET}"))
+        lines.append(border_line)
+
     result = "\n".join([line + CLEAR_LINE for line in lines])
     if stats is not None:
         result += "\n" + _render_stats_box(stats)
-        result += "\n" + _render_time_box(stats)
     return result
 
 
@@ -894,7 +915,7 @@ def print_report(fmt="text"):
         print(f"\n{CYAN}+{'=' * (W - 2)}+{RESET}\n")
         return
 
-    all_working = all_hanging = all_rendering = all_crashes = all_sessions = 0.0
+    all_working = all_hanging = all_rendering = all_idle = all_crashes = all_sessions = 0.0
 
     for s in weeks:
         try:
@@ -917,6 +938,7 @@ def print_report(fmt="text"):
         all_working   += s["working_s"]
         all_hanging   += s["hanging_s"]
         all_rendering += s["rendering_s"]
+        all_idle      += s["idle_s"]
         all_crashes   += s["crash_count"]
         all_sessions  += s["session_count"]
 
@@ -929,6 +951,7 @@ def print_report(fmt="text"):
         print(f"    working    {WHITE}{_fmt_duration(all_working):<10}{RESET}")
         print(f"    hung       {total_color}{_fmt_duration(all_hanging):<10}  {total_pct:.1f}%{RESET}")
         print(f"    rendering  {WHITE}{_fmt_duration(all_rendering):<10}{RESET}")
+        print(f"    idle       {WHITE}{_fmt_duration(all_idle):<10}{RESET}")
         print(f"    crashes {total_color}{int(all_crashes)}{RESET}   sessions {int(all_sessions)}")
         print()
 
@@ -991,7 +1014,9 @@ def start_monitoring(target_script_name=None, threshold_gb=None, interval_s=None
     print(f"{CLEAR_LINE}{CYAN}Starting Vitals Watchdog. Searching for {target_display}...{RESET}")
 
     active_instances = {}        # pid -> dict
-    last_max_active_time = {}    # pid -> timestamp Max was last in foreground
+    last_max_active_time = {}    # pid -> timestamp of last user input while Max was foreground
+    idle_accumulator_s = 0.0     # continuous idle seconds; resets on Max foreground
+    last_input_tick = 0          # dwTime of last system input event seen this session
     vram_monitor = VRAMMonitor()
     storage_monitor = StorageMonitor()
     stats_tracker = vitals_stats.SessionTracker()
@@ -1113,7 +1138,9 @@ def start_monitoring(target_script_name=None, threshold_gb=None, interval_s=None
                     'vram_metrics': vram_metrics,
                     'state': state,
                     'warning_msg': msg,
-                    'status_msg': ctx['status_msg']
+                    'status_msg': ctx['status_msg'],
+                    'is_foreground': pid == foreground_pid,
+                    'is_rendering': is_rendering,
                 })
 
             if not instances_data:
@@ -1134,11 +1161,19 @@ def start_monitoring(target_script_name=None, threshold_gb=None, interval_s=None
                     agg_state = WARNING
                 if active_instances.get(inst['pid'], {}).get('is_rendering'):
                     agg_rendering = True
-            # Update last-active timestamp for whichever Max instance is in foreground
+            # Update last-active timestamp only when actual user input was detected.
+            # GetLastInputInfo returns the same tick while the user is idle, so
+            # Max sitting in the foreground while saving/loading doesn't reset the timer.
+            # Falls back to foreground-only on non-Windows (get_last_input_tick returns 0).
+            current_input_tick = vitals_core.get_last_input_tick()
             if foreground_pid in active_instances:
-                last_max_active_time[foreground_pid] = time.time()
+                input_happened = (current_input_tick == 0) or (current_input_tick != last_input_tick)
+                if input_happened:
+                    last_max_active_time[foreground_pid] = time.time()
+            last_input_tick = current_input_tick
 
             idle_threshold_s = CONFIG["monitoring"].get("idle_threshold_seconds", 5.0)
+            idle_cutoff_s    = CONFIG["monitoring"].get("idle_cutoff_seconds", 300.0)
             now = time.time()
             is_idle = not any(
                 now - last_max_active_time.get(pid, 0) <= idle_threshold_s
@@ -1146,12 +1181,22 @@ def start_monitoring(target_script_name=None, threshold_gb=None, interval_s=None
             )
             if not _is_work_hours():
                 is_idle = True
-            stats_tracker.record_tick(agg_state, agg_rendering and agg_state != HUNG, interval_s, is_idle=is_idle)
+
+            if is_idle:
+                idle_accumulator_s += interval_s
+            else:
+                idle_accumulator_s = 0.0
+            is_away = is_idle and idle_accumulator_s > idle_cutoff_s
+
+            if not is_away:
+                stats_tracker.record_tick(agg_state, agg_rendering and agg_state != HUNG, interval_s, is_idle=is_idle)
 
             if agg_state == HUNG:
                 current_category = "hanging"
             elif agg_rendering:
                 current_category = "rendering"
+            elif is_away:
+                current_category = "away"
             elif is_idle:
                 current_category = "idle"
             else:

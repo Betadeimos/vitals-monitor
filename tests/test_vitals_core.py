@@ -89,5 +89,25 @@ class TestVitalsCore(unittest.TestCase):
         self.assertEqual(metrics['priority'], 32)
         self.assertEqual(metrics['cpu_affinity'], [0, 1, 2, 3])
 
+    def test_get_last_input_tick_returns_int(self):
+        tick = vitals_core.get_last_input_tick()
+        self.assertIsInstance(tick, int)
+
+    @patch('os.name', 'nt')
+    def test_get_last_input_tick_windows_success(self):
+        mock_user32 = MagicMock()
+        mock_user32.GetLastInputInfo.side_effect = lambda ptr: (
+            setattr(ptr._obj, 'dwTime', 12345) or True
+        )
+        with patch.object(vitals_core.ctypes, 'windll', create=True) as mock_windll:
+            mock_windll.user32 = mock_user32
+            # Just confirm it returns an int without raising
+            result = vitals_core.get_last_input_tick()
+            self.assertIsInstance(result, int)
+
+    @patch('os.name', 'posix')
+    def test_get_last_input_tick_nonwindows_returns_zero(self):
+        self.assertEqual(vitals_core.get_last_input_tick(), 0)
+
 if __name__ == '__main__':
     unittest.main()

@@ -3,6 +3,8 @@ import os
 import time
 from datetime import date, timedelta
 
+_STATS_FILE = os.path.join(os.path.expanduser("~"), "vitals_stats.json")
+
 
 def _current_week_start():
     today = date.today()
@@ -21,8 +23,8 @@ def _blank_week():
 
 
 class SessionTracker:
-    def __init__(self, stats_file="vitals_stats.json"):
-        self.stats_file = stats_file
+    def __init__(self, stats_file=None):
+        self.stats_file = stats_file or _STATS_FILE
         self._store = self._load()
         self._week = self._current_week_dict()
         self._last_save = time.monotonic()
