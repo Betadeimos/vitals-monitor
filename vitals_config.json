@@ -17,6 +17,14 @@
     "monitoring": {
         "refresh_interval_seconds": 0.5,
         "vram_monitor_interval_seconds": 2.0,
-        "memory_tracker_window_size_seconds": 5.0
+        "memory_tracker_window_size_seconds": 5.0,
+        "idle_threshold_minutes": 0.083
+    },
+    "schedule": {
+        "enabled": true,
+        "work_start_weekday": 0,
+        "work_start_hour": 1,
+        "work_end_weekday": 5,
+        "work_end_hour": 0
     }
 }

@@ -8,6 +8,7 @@ import re
 from collections import deque
 import psutil
 import vitals_core
+import vitals_stats
 
 ANSI_ESCAPE = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
 
@@ -31,7 +32,15 @@ DEFAULT_CONFIG = {
     "monitoring": {
         "refresh_interval_seconds": 0.5,
         "vram_monitor_interval_seconds": 2.0,
-        "memory_tracker_window_size_seconds": 5.0
+        "memory_tracker_window_size_seconds": 5.0,
+        "idle_threshold_minutes": 0.083
+    },
+    "schedule": {
+        "enabled": True,
+        "work_start_weekday": 0,
+        "work_start_hour": 1,
+        "work_end_weekday": 5,
+        "work_end_hour": 0
     }
 }
 
@@ -534,7 +543,127 @@ def restore_all(active_instances=None):
             pass
     _demoted_hogs.clear()
 
-def render_ui(metrics=None, storage_metrics=None, vram_metrics=None, system_cpu=None, state=NORMAL, warning_msg="", instances=None, global_warning=None):
+def _fmt_duration(seconds):
+    s = int(seconds)
+    h, m = divmod(s, 3600)
+    m, s = divmod(m, 60)
+    if h > 0:
+        return f"{h}h {m:02d}m"
+    if m > 0:
+        return f"{m}m {s:02d}s"
+    return f"{s}s"
+
+
+def _draw_stats_bar(label, seconds, total_s, color, bar_length=30, active=False):
+    ratio = (seconds / total_s) if total_s > 0 else 0.0
+    filled = max(0, min(int(bar_length * ratio), bar_length))
+    bar = "■" * filled + "-" * (bar_length - filled)
+    pct = f"{ratio * 100:5.1f}%"
+    dur = _fmt_duration(seconds)
+    marker = f"{color}>{RESET}" if active else " "
+    return (
+        f"{marker} {color}{label:<7}{RESET} "
+        f"{CYAN}[{color}{bar}{CYAN}]{RESET} "
+        f"{pct}  {WHITE}{dur}{RESET}"
+    )
+
+
+def _render_stats_box(summary):
+    WIDTH = 80
+    border = f"{CYAN}+{'=' * (WIDTH - 2)}+{RESET}"
+    sep    = f"{CYAN}| {'-' * (WIDTH - 4)} |{RESET}"
+
+    def fline(content, align="left"):
+        vis = len(ANSI_ESCAPE.sub("", content))
+        pad = max(0, (WIDTH - 4) - vis)
+        if align == "center":
+            l, r = pad // 2, pad - pad // 2
+            return f"{CYAN}| {RESET}{' ' * l}{content}{' ' * r}{CYAN} |{RESET}"
+        return f"{CYAN}| {RESET}{content}{' ' * pad}{CYAN} |{RESET}"
+
+    from datetime import datetime
+    try:
+        ws = datetime.strptime(summary["week_start"], "%Y-%m-%d").strftime("%a %b %d")
+    except (ValueError, KeyError):
+        ws = summary.get("week_start", "")
+
+    billable = summary["billable_s"]
+    sessions = summary["session_count"]
+    crashes  = summary["crash_count"]
+    active   = summary.get("active")
+
+    lines = [
+        border,
+        fline(f"{WHITE}S E S S I O N   T R A C K E R{RESET}", align="center"),
+        fline(f"{CYAN}week of {ws}  |  {sessions} session{'s' if sessions != 1 else ''}{RESET}", align="center"),
+        sep,
+        fline(_draw_stats_bar("WORKING", summary["working_s"], billable, GREEN, active=(active == "working"))),
+        fline(_draw_stats_bar("HUNG",    summary["hanging_s"], billable, RED,   active=(active == "hanging"))),
+        sep,
+    ]
+
+    render_mark = f"{YELLOW}>{RESET}" if active == "rendering" else " "
+    render_str = f"{render_mark} render: {_fmt_duration(summary['rendering_s'])}"
+    crash_str  = f"crashes: {crashes}"
+    total_str  = f"tracked: {_fmt_duration(summary['total_s'])}"
+    inner = WIDTH - 4
+    vis_render = len(ANSI_ESCAPE.sub("", render_str))
+    gap1 = max(2, (inner - vis_render - len(crash_str) - len(total_str)) // 2)
+    info_line = f"{WHITE}{render_str}{' ' * gap1}{crash_str}{' ' * gap1}{total_str}{RESET}"
+    lines.append(fline(info_line))
+
+    at = summary.get("all_time")
+    if at:
+        at_str = (
+            f"{CYAN}all-time:{RESET}  "
+            f"{GREEN}work {_fmt_duration(at['working_s'])}{RESET}  "
+            f"{RED}hung {_fmt_duration(at['hanging_s'])}{RESET}  "
+            f"{WHITE}sessions {at['session_count']}  crashes {at['crash_count']}{RESET}"
+        )
+        lines.append(sep)
+        lines.append(fline(at_str, align="center"))
+    lines.append(border)
+
+    return "\n".join(line + CLEAR_LINE for line in lines)
+
+
+def _render_time_box(summary):
+    WIDTH = 80
+    border = f"{CYAN}+{'=' * (WIDTH - 2)}+{RESET}"
+    sep    = f"{CYAN}| {'-' * (WIDTH - 4)} |{RESET}"
+
+    def fline(content, align="left"):
+        vis = len(ANSI_ESCAPE.sub("", content))
+        pad = max(0, (WIDTH - 4) - vis)
+        if align == "center":
+            l, r = pad // 2, pad - pad // 2
+            return f"{CYAN}| {RESET}{' ' * l}{content}{' ' * r}{CYAN} |{RESET}"
+        return f"{CYAN}| {RESET}{content}{' ' * pad}{CYAN} |{RESET}"
+
+    active = summary["active_s"]
+    idle   = summary["idle_s"]
+    total  = summary["total_s"]
+    cur    = summary.get("active")
+
+    active_str = f"active: {_fmt_duration(active)}"
+    idle_str   = f"idle:   {_fmt_duration(idle)}"
+    inner = WIDTH - 4
+    gap = max(3, inner - len(active_str) - len(idle_str))
+    detail = f"{GREEN}{active_str}{' ' * gap}{CYAN}{idle_str}{RESET}"
+
+    lines = [
+        border,
+        fline(f"{WHITE}T I M E   B R E A K D O W N{RESET}", align="center"),
+        sep,
+        fline(_draw_stats_bar("IDLE", idle, total, CYAN, active=(cur == "idle"))),
+        sep,
+        fline(detail),
+        border,
+    ]
+    return "\n".join(line + CLEAR_LINE for line in lines)
+
+
+def render_ui(metrics=None, storage_metrics=None, vram_metrics=None, system_cpu=None, state=NORMAL, warning_msg="", instances=None, global_warning=None, stats=None):
     WIDTH = 80
     border_line = f"{CYAN}+{'='*(WIDTH-2)}+{RESET}"
     separator_line = f"{CYAN}| {'-'*(WIDTH-4)} |{RESET}"
@@ -681,8 +810,70 @@ def render_ui(metrics=None, storage_metrics=None, vram_metrics=None, system_cpu=
 
         
         lines.append(border_line)
-        
-    return "\n".join([line + CLEAR_LINE for line in lines])
+
+    result = "\n".join([line + CLEAR_LINE for line in lines])
+    if stats is not None:
+        result += "\n" + _render_stats_box(stats)
+        result += "\n" + _render_time_box(stats)
+    return result
+
+
+def print_report():
+    from datetime import datetime
+    tracker = vitals_stats.SessionTracker()
+    weeks = tracker.all_weeks()
+
+    W = 60
+    print(f"\n{CYAN}+{'=' * (W - 2)}+{RESET}")
+    print(f"{CYAN}|{RESET}{WHITE}{'VITALS REPORT':^{W-2}}{RESET}{CYAN}|{RESET}")
+    print(f"{CYAN}+{'=' * (W - 2)}+{RESET}\n")
+
+    if not weeks:
+        print("  No data recorded yet.")
+        print(f"\n{CYAN}+{'=' * (W - 2)}+{RESET}\n")
+        return
+
+    all_working = all_hanging = all_rendering = all_crashes = all_sessions = 0.0
+
+    for s in weeks:
+        try:
+            ws = datetime.strptime(s["week_start"], "%Y-%m-%d").strftime("%a %b %d, %Y")
+        except ValueError:
+            ws = s["week_start"]
+
+        billable = s["billable_s"]
+        hang_pct = (s["hanging_s"] / billable * 100) if billable > 0 else 0.0
+        hang_color = RED if hang_pct >= 15 else (YELLOW if hang_pct >= 5 else GREEN)
+
+        print(f"  {CYAN}Week of {ws}{RESET}")
+        print(f"    working    {WHITE}{_fmt_duration(s['working_s']):<10}{RESET}")
+        print(f"    hung       {hang_color}{_fmt_duration(s['hanging_s']):<10}  {hang_pct:.1f}% of active time{RESET}")
+        print(f"    rendering  {WHITE}{_fmt_duration(s['rendering_s']):<10}{RESET}")
+        print(f"    idle       {WHITE}{_fmt_duration(s['idle_s']):<10}{RESET}")
+        print(f"    crashes {hang_color}{s['crash_count']}{RESET}   sessions {s['session_count']}")
+        print()
+
+        all_working   += s["working_s"]
+        all_hanging   += s["hanging_s"]
+        all_rendering += s["rendering_s"]
+        all_crashes   += s["crash_count"]
+        all_sessions  += s["session_count"]
+
+    if len(weeks) > 1:
+        total_billable = all_working + all_hanging
+        total_pct = (all_hanging / total_billable * 100) if total_billable > 0 else 0.0
+        total_color = RED if total_pct >= 15 else (YELLOW if total_pct >= 5 else GREEN)
+        print(f"  {CYAN}{'─' * (W - 4)}{RESET}")
+        print(f"  {WHITE}ALL TIME{RESET}")
+        print(f"    working    {WHITE}{_fmt_duration(all_working):<10}{RESET}")
+        print(f"    hung       {total_color}{_fmt_duration(all_hanging):<10}  {total_pct:.1f}%{RESET}")
+        print(f"    rendering  {WHITE}{_fmt_duration(all_rendering):<10}{RESET}")
+        print(f"    crashes {total_color}{int(all_crashes)}{RESET}   sessions {int(all_sessions)}")
+        print()
+
+    print(f"{CYAN}+{'=' * (W - 2)}+{RESET}\n")
+
+
 def parse_args():
     parser = argparse.ArgumentParser(
         description=f"{CYAN}V I T A L S   W A T C H D O G\nReal-time resource monitor and crash predictor.{RESET}",
@@ -695,6 +886,8 @@ def parse_args():
                         help='Memory spike threshold in GB to trigger warnings (default: 0.10)')
     parser.add_argument('-i', '--interval', type=float, default=0.5,
                         help='Refresh interval in seconds (default: 0.5)')
+    parser.add_argument('--report', action='store_true',
+                        help='Print a summary of all recorded weeks and exit')
     return parser.parse_args()
 
 def clear_screen(full=False):
@@ -706,6 +899,18 @@ def clear_screen(full=False):
             # Just move cursor to top-left for flicker-free update
             sys.stdout.write(MOVE_CURSOR_TOP)
         sys.stdout.flush()
+
+
+def _is_work_hours():
+    sched = CONFIG.get("schedule", {})
+    if not sched.get("enabled", True):
+        return True
+    t = time.localtime()
+    current = t.tm_wday * 1440 + t.tm_hour * 60 + t.tm_min
+    start   = sched.get("work_start_weekday", 0) * 1440 + sched.get("work_start_hour", 1) * 60
+    end     = sched.get("work_end_weekday",   5) * 1440 + sched.get("work_end_hour",   0) * 60
+    return start <= current < end
+
 
 def start_monitoring(target_script_name=None, threshold_gb=None, interval_s=None):
     if threshold_gb is None:
@@ -719,10 +924,12 @@ def start_monitoring(target_script_name=None, threshold_gb=None, interval_s=None
     # Clear screen initially
     clear_screen(full=True)
     print(f"{CLEAR_LINE}{CYAN}Starting Vitals Watchdog. Searching for {target_display}...{RESET}")
-    
-    active_instances = {} # pid -> dict
+
+    active_instances = {}        # pid -> dict
+    last_max_active_time = {}    # pid -> timestamp Max was last in foreground
     vram_monitor = VRAMMonitor()
     storage_monitor = StorageMonitor()
+    stats_tracker = vitals_stats.SessionTracker()
     
     try:
         while True:
@@ -748,7 +955,6 @@ def start_monitoring(target_script_name=None, threshold_gb=None, interval_s=None
 
             for proc in unique_procs:
                 if proc.pid not in active_instances:
-                    # Fetch window title from our batch map
                     win_info = window_map.get(proc.pid, {'title': None})
                     active_instances[proc.pid] = {
                         'proc': proc,
@@ -757,17 +963,22 @@ def start_monitoring(target_script_name=None, threshold_gb=None, interval_s=None
                         'title': win_info['title'],
                         'status_msg': None
                     }
+                    last_max_active_time[proc.pid] = time.time()
+                    stats_tracker.record_session_start()
                     clear_screen(full=True)
                     print(f"{CLEAR_LINE}{GREEN}Found process! Locking onto PID: {proc.pid}{RESET}")
-            
+
             # 3. Check for closed instances
             pids_to_remove = []
             for pid, ctx in active_instances.items():
                 if not ctx['proc'].is_running():
                     pids_to_remove.append(pid)
-                    
+
             for pid in pids_to_remove:
+                last_state = active_instances[pid]['state']
                 del active_instances[pid]
+                last_max_active_time.pop(pid, None)
+                stats_tracker.record_exit(last_state)
                 clear_screen(full=True)
                 print(f"{CLEAR_LINE}{RED_BLINK}Process {pid} lost! Removing from dashboard...{RESET}")
             
@@ -803,22 +1014,28 @@ def start_monitoring(target_script_name=None, threshold_gb=None, interval_s=None
             for pid, ctx in list(active_instances.items()):
                 proc = ctx['proc']
                 tracker = ctx['tracker']
-                current_state = ctx['state']
-                
+
                 metrics = vitals_core.get_process_metrics(proc)
                 if not metrics:
-                    continue # might have closed just now
-                
+                    continue
+
                 tracker.add_reading(metrics['memory_gb'])
-                
-                # Instant check from batch window_map
-                win_info = window_map.get(pid, {'is_responding': True})
-                is_responding = win_info['is_responding']
-                
+
+                win_info = window_map.get(pid, {'is_responding': True, 'title': ''})
+                is_responding = win_info.get('is_responding', True)
+                title = win_info.get('title') or ctx['title'] or ''
+                if title:
+                    ctx['title'] = title
+                cpu_threshold = float(CONFIG["tier1"]["cpu_threshold_percent"])
+                is_rendering = (
+                    'rendering' in title.lower()
+                    or metrics['cpu_percent'] > cpu_threshold
+                )
+
                 state, msg = determine_state(metrics, system_ram_percent, tracker, threshold_gb=threshold_gb, is_responding=is_responding)
-                
                 ctx['state'] = state
-                
+                ctx['is_rendering'] = is_rendering
+
                 if state == CRITICAL:
                     has_critical = True
                     critical_proc = proc
@@ -833,16 +1050,57 @@ def start_monitoring(target_script_name=None, threshold_gb=None, interval_s=None
                     'warning_msg': msg,
                     'status_msg': ctx['status_msg']
                 })
-                
+
             if not instances_data:
                 time.sleep(interval_s)
                 continue
+
+            # Aggregate state across all instances for the stats tracker
+            agg_state = NORMAL
+            agg_rendering = False
+            for inst in instances_data:
+                s = inst['state']
+                if s == HUNG:
+                    agg_state = HUNG
+                    break
+                if s == CRITICAL:
+                    agg_state = CRITICAL
+                elif s == WARNING and agg_state == NORMAL:
+                    agg_state = WARNING
+                if active_instances.get(inst['pid'], {}).get('is_rendering'):
+                    agg_rendering = True
+            # Update last-active timestamp for whichever Max instance is in foreground
+            if foreground_pid in active_instances:
+                last_max_active_time[foreground_pid] = time.time()
+
+            idle_threshold_s = CONFIG["monitoring"].get("idle_threshold_minutes", 0.083) * 60
+            now = time.time()
+            is_idle = not any(
+                now - last_max_active_time.get(pid, 0) <= idle_threshold_s
+                for pid in active_instances
+            )
+            if not _is_work_hours():
+                is_idle = True
+            stats_tracker.record_tick(agg_state, agg_rendering and agg_state != HUNG, interval_s, is_idle=is_idle)
+
+            if agg_state == HUNG:
+                current_category = "hanging"
+            elif agg_rendering:
+                current_category = "rendering"
+            elif is_idle:
+                current_category = "idle"
+            else:
+                current_category = "working"
+
+            summary = stats_tracker.summary()
+            summary["active"] = current_category
 
             ui_output = render_ui(
                 storage_metrics=storage_metrics,
                 system_cpu=system_cpu,
                 instances=instances_data,
-                global_warning=global_warning
+                global_warning=global_warning,
+                stats=summary
             )
             clear_screen()
             print(ui_output)
@@ -888,12 +1146,16 @@ def start_monitoring(target_script_name=None, threshold_gb=None, interval_s=None
             time.sleep(interval_s)
     finally:
         restore_all(active_instances)
+        stats_tracker.save()
         vram_monitor.stop()
         storage_monitor.stop()
 
 def main():
     try:
         args = parse_args()
+        if args.report:
+            print_report()
+            return
         start_monitoring(args.target, args.threshold, args.interval)
     except KeyboardInterrupt:
         restore_all()

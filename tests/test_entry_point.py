@@ -19,6 +19,7 @@ class TestEntryPoint(unittest.TestCase):
         mock_args.target = "custom_proc"
         mock_args.threshold = 200
         mock_args.interval = 1.0
+        mock_args.report = False
         mock_parse.return_value = mock_args
         
         with patch.object(sys, 'argv', ['vitals', 'custom_proc']):
