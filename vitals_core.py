@@ -197,25 +197,6 @@ def get_main_window_handle(pid):
     except Exception:
         return None
 
-def attempt_rescue(pid):
-    """
-    Sends a WM_KEYDOWN message with VK_ESCAPE to the process's main window.
-    Only works on Windows.
-    """
-    if os.name != 'nt' or ctypes is None:
-        return False
-    
-    hwnd = get_main_window_handle(pid)
-    if hwnd:
-        try:
-            WM_KEYDOWN = 0x0100
-            VK_ESCAPE = 0x1B
-            ctypes.windll.user32.PostMessageW(hwnd, WM_KEYDOWN, VK_ESCAPE, 0)
-            return True
-        except Exception:
-            pass
-    return False
-
 def get_window_title(pid):
     """
     Returns the window title of the main window for a given PID on Windows.
@@ -380,26 +361,31 @@ def get_storage_metrics():
         metrics[letter] = {'utilization_percent': round(min(max(util, 0.0), 100.0), 1)}
     return metrics
 
+VRAM_LAST_ERROR = None
+
+
 def get_vram_metrics(pids=None):
     """
-    Execute nvidia-smi and return batch results.
+    Execute nvidia-smi and return batch results. Sub-failures (typeperf,
+    per-PID compute apps) are recorded in VRAM_LAST_ERROR rather than
+    silently swallowed.
     """
+    global VRAM_LAST_ERROR
     try:
         output = subprocess.check_output(
             ["nvidia-smi", "--query-gpu=memory.used,memory.total", "--format=csv,noheader,nounits"],
             stderr=subprocess.STDOUT
         ).decode('utf-8').strip()
-        
+
         total_used_mb = 0.0
         total_max_mb = 0.0
-        lines = output.split('\n')
-        for line in lines:
+        for line in output.split('\n'):
             if not line.strip(): continue
             parts = line.split(',')
             if len(parts) == 2:
                 total_used_mb += float(parts[0].strip())
                 total_max_mb += float(parts[1].strip())
-        
+
         if total_max_mb <= 0: return None
 
         metrics = {
@@ -420,7 +406,8 @@ def get_vram_metrics(pids=None):
                         vals = data_line.split(',')
                         total_shared_bytes = sum(float(v.strip('"')) for v in vals[1:] if v.strip('"'))
                         metrics['shared_used_gb'] = round(total_shared_bytes / (1024**3), 2)
-            except Exception: pass
+            except Exception as e:
+                VRAM_LAST_ERROR = f"typeperf shared-GPU read failed: {e!r}"
 
         if pids:
             try:
@@ -435,10 +422,13 @@ def get_vram_metrics(pids=None):
                     if len(parts) == 2:
                         p, v = int(parts[0].strip()), float(parts[1].strip())
                         if p in pids: metrics['per_pid_vram_gb'][p] += round(v / 1024, 2)
-            except Exception: pass
+            except Exception as e:
+                VRAM_LAST_ERROR = f"per-PID VRAM read failed: {e!r}"
 
         return metrics
-    except Exception: return None
+    except Exception as e:
+        VRAM_LAST_ERROR = f"nvidia-smi failed: {e!r}"
+        return None
 
 def empty_working_set(pid):
     """

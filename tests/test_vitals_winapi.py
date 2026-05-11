@@ -166,18 +166,5 @@ class TestVitalsWinAPI(unittest.TestCase):
         hwnd = vitals_core.get_main_window_handle(1234)
         self.assertEqual(hwnd, 100)
 
-    @patch('os.name', 'nt')
-    @patch('vitals_core.ctypes', create=True)
-    def test_attempt_rescue_windows(self, mock_ctypes):
-        mock_user32 = mock_ctypes.windll.user32
-        
-        # Mock get_main_window_handle to return 100
-        with patch('vitals_core.get_main_window_handle', return_value=100):
-            success = vitals_core.attempt_rescue(1234)
-            
-            self.assertTrue(success)
-            # WM_KEYDOWN = 0x0100, VK_ESCAPE = 0x1B
-            mock_user32.PostMessageW.assert_called_with(100, 0x0100, 0x1B, 0)
-
 if __name__ == '__main__':
     unittest.main()

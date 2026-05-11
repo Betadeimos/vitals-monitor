@@ -8,17 +8,11 @@
         "system_ram_threshold_percent": 90.0,
         "window_seconds": 5.0
     },
-    "tier3": {
-        "cores_to_strip": [
-            0,
-            1
-        ]
-    },
     "monitoring": {
         "refresh_interval_seconds": 0.5,
         "vram_monitor_interval_seconds": 2.0,
         "memory_tracker_window_size_seconds": 5.0,
-        "idle_threshold_minutes": 0.083
+        "idle_threshold_seconds": 5.0
     },
     "schedule": {
         "enabled": true,

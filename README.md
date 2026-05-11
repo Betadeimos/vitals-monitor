@@ -18,9 +18,11 @@ pip install -e .
 ## Run
 
 ```bash
-vitals                  # Watch for 3dsmax (and max_simulator) by default
-vitals <process_name>   # Target any process name
-vitals --report         # Print weekly time totals and exit
+vitals                       # Watch for 3dsmax (and max_simulator) by default
+vitals <process_name>        # Target any process name
+vitals --report              # Print weekly time totals and exit
+vitals --report --csv        # Same data as CSV (pipeable to a spreadsheet)
+vitals --report --json       # Same data as JSON
 ```
 
 Optional flags: `--threshold <GB>` (RAM spike sensitivity), `--interval <sec>` (refresh rate). Defaults are read from `vitals_config.json`, which is auto-created on first run.
@@ -62,7 +64,7 @@ The `>` marker shows which bucket the current tick is being recorded into. Prior
 |-----------|---------|
 | HUNG      | Windows reports the main window as "Not Responding". |
 | rendering | Max CPU is above the configured threshold (default 80%), or the window title contains "rendering". |
-| idle      | No Max instance has been the foreground window for `idle_threshold_minutes`, or it is outside the configured work hours. |
+| idle      | No Max instance has been the foreground window for `idle_threshold_seconds`, or it is outside the configured work hours. |
 | working   | Anything else, while inside work hours. |
 
 A crash is counted when a process exits while in HUNG or CRITICAL state.

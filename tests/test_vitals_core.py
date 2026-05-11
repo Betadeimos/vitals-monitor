@@ -47,10 +47,47 @@ class TestVitalsCore(unittest.TestCase):
         mock_process.memory_info.return_value.rss = 1 * 1024 * 1024 * 1024
         # Mock cpu_percent
         mock_process.cpu_percent.return_value = 15.5
-        
+
         metrics = vitals_core.get_process_metrics(mock_process)
         self.assertEqual(metrics['memory_gb'], 1.0)
         self.assertEqual(metrics['cpu_percent'], 15.5)
+
+    @patch('psutil.cpu_count')
+    def test_get_process_metrics_cpu_normalization_4_cores(self, mock_cpu_count):
+        mock_cpu_count.return_value = 4
+        mock_process = MagicMock()
+        mock_process.cpu_percent.return_value = 400.0
+        mock_process.memory_info.return_value.rss = 1024 * 1024 * 1024
+
+        metrics = vitals_core.get_process_metrics(mock_process)
+        self.assertEqual(metrics['cpu_percent'], 100.0)
+        self.assertEqual(metrics['memory_gb'], 1.0)
+
+    @patch('psutil.cpu_count')
+    def test_get_process_metrics_cpu_normalization_2_cores(self, mock_cpu_count):
+        mock_cpu_count.return_value = 2
+        mock_process = MagicMock()
+        mock_process.cpu_percent.return_value = 50.0
+        mock_process.memory_info.return_value.rss = 512 * 1024 * 1024
+
+        metrics = vitals_core.get_process_metrics(mock_process)
+        self.assertEqual(metrics['cpu_percent'], 25.0)
+        self.assertEqual(metrics['memory_gb'], 0.5)
+
+    @patch('psutil.cpu_count')
+    def test_get_process_metrics_priority_and_affinity(self, mock_cpu_count):
+        mock_cpu_count.return_value = 4
+        mock_process = MagicMock()
+        mock_process.cpu_percent.return_value = 100.0
+        mock_process.memory_info.return_value.rss = 1024 * 1024 * 1024
+        mock_process.nice.return_value = 32
+        mock_process.cpu_affinity.return_value = [0, 1, 2, 3]
+
+        metrics = vitals_core.get_process_metrics(mock_process)
+        self.assertEqual(metrics['cpu_percent'], 25.0)
+        self.assertEqual(metrics['memory_gb'], 1.0)
+        self.assertEqual(metrics['priority'], 32)
+        self.assertEqual(metrics['cpu_affinity'], [0, 1, 2, 3])
 
 if __name__ == '__main__':
     unittest.main()

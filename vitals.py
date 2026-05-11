@@ -10,6 +10,11 @@ import psutil
 import vitals_core
 import vitals_stats
 
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+except (AttributeError, OSError):
+    pass
+
 ANSI_ESCAPE = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
 
 if os.name == 'nt':
@@ -26,14 +31,11 @@ DEFAULT_CONFIG = {
         "system_ram_threshold_percent": 90.0,
         "window_seconds": 5.0
     },
-    "tier3": {
-        "cores_to_strip": [0, 1]
-    },
     "monitoring": {
         "refresh_interval_seconds": 0.5,
         "vram_monitor_interval_seconds": 2.0,
         "memory_tracker_window_size_seconds": 5.0,
-        "idle_threshold_minutes": 0.083
+        "idle_threshold_seconds": 5.0
     },
     "schedule": {
         "enabled": True,
@@ -51,12 +53,18 @@ def load_config():
                 json.dump(DEFAULT_CONFIG, f, indent=4)
         except Exception:
             return DEFAULT_CONFIG
-    
+
     try:
         with open(CONFIG_FILE, 'r') as f:
-            return json.load(f)
+            cfg = json.load(f)
     except Exception:
         return DEFAULT_CONFIG
+
+    mon = cfg.setdefault("monitoring", {})
+    if "idle_threshold_seconds" not in mon and "idle_threshold_minutes" in mon:
+        mon["idle_threshold_seconds"] = float(mon.pop("idle_threshold_minutes")) * 60.0
+    cfg.pop("tier3", None)
+    return cfg
 
 CONFIG = load_config()
 
@@ -475,7 +483,6 @@ def manage_orchestration(active_instances, system_ram_percent, foreground_pid, a
                     # Demote non-VIP
                     if proc.nice() != IDLE_PRIORITY:
                         proc.nice(IDLE_PRIORITY)
-                        import vitals_core
                         vitals_core.empty_working_set(proc.pid)
                     ctx['status_msg'] = "[ STATUS: DEMOTED TO RECLAIM RAM ]"
                 else:
@@ -499,7 +506,6 @@ def manage_orchestration(active_instances, system_ram_percent, foreground_pid, a
                         continue
                     if proc.nice() != IDLE_PRIORITY:
                         proc.nice(IDLE_PRIORITY)
-                        import vitals_core
                         vitals_core.empty_working_set(proc.pid)
                         _demoted_hogs.add(proc)
             except (psutil.NoSuchProcess, psutil.AccessDenied, AttributeError, KeyError):
@@ -818,10 +824,65 @@ def render_ui(metrics=None, storage_metrics=None, vram_metrics=None, system_cpu=
     return result
 
 
-def print_report():
+def _sparkline(working_s, hanging_s, width=20):
+    """20-char bar showing working/hung split. Empty = no billable time."""
+    total = working_s + hanging_s
+    if total <= 0:
+        return f"{CYAN}[{'-' * width}]{RESET}"
+    w_chars = round((working_s / total) * width)
+    h_chars = width - w_chars
+    return (
+        f"{CYAN}[{GREEN}{'■' * w_chars}{RED}{'■' * h_chars}{CYAN}]{RESET}"
+    )
+
+
+def _export_csv(weeks):
+    """Plain CSV to stdout, one row per week plus an ALL-TIME row if >1 week."""
+    print("week_start,working_s,hanging_s,rendering_s,idle_s,billable_s,active_s,total_s,hung_pct,crashes,sessions")
+    totals = {"w": 0.0, "h": 0.0, "r": 0.0, "i": 0.0, "c": 0, "s": 0}
+    for w in weeks:
+        bill = w["billable_s"]
+        pct = (w["hanging_s"] / bill * 100) if bill > 0 else 0.0
+        print(
+            f"{w['week_start']},{w['working_s']:.1f},{w['hanging_s']:.1f},"
+            f"{w['rendering_s']:.1f},{w['idle_s']:.1f},{bill:.1f},"
+            f"{w['active_s']:.1f},{w['total_s']:.1f},{pct:.2f},"
+            f"{w['crash_count']},{w['session_count']}"
+        )
+        totals["w"] += w["working_s"]
+        totals["h"] += w["hanging_s"]
+        totals["r"] += w["rendering_s"]
+        totals["i"] += w["idle_s"]
+        totals["c"] += w["crash_count"]
+        totals["s"] += w["session_count"]
+    if len(weeks) > 1:
+        bill = totals["w"] + totals["h"]
+        active = bill + totals["r"]
+        total = active + totals["i"]
+        pct = (totals["h"] / bill * 100) if bill > 0 else 0.0
+        print(
+            f"ALL_TIME,{totals['w']:.1f},{totals['h']:.1f},{totals['r']:.1f},"
+            f"{totals['i']:.1f},{bill:.1f},{active:.1f},{total:.1f},"
+            f"{pct:.2f},{totals['c']},{totals['s']}"
+        )
+
+
+def _export_json(weeks):
+    """Pretty-printed JSON list to stdout."""
+    print(json.dumps(weeks, indent=2))
+
+
+def print_report(fmt="text"):
     from datetime import datetime
     tracker = vitals_stats.SessionTracker()
     weeks = tracker.all_weeks()
+
+    if fmt == "csv":
+        _export_csv(weeks)
+        return
+    if fmt == "json":
+        _export_json(weeks)
+        return
 
     W = 60
     print(f"\n{CYAN}+{'=' * (W - 2)}+{RESET}")
@@ -845,7 +906,7 @@ def print_report():
         hang_pct = (s["hanging_s"] / billable * 100) if billable > 0 else 0.0
         hang_color = RED if hang_pct >= 15 else (YELLOW if hang_pct >= 5 else GREEN)
 
-        print(f"  {CYAN}Week of {ws}{RESET}")
+        print(f"  {CYAN}Week of {ws}{RESET}  {_sparkline(s['working_s'], s['hanging_s'])}")
         print(f"    working    {WHITE}{_fmt_duration(s['working_s']):<10}{RESET}")
         print(f"    hung       {hang_color}{_fmt_duration(s['hanging_s']):<10}  {hang_pct:.1f}% of active time{RESET}")
         print(f"    rendering  {WHITE}{_fmt_duration(s['rendering_s']):<10}{RESET}")
@@ -864,7 +925,7 @@ def print_report():
         total_pct = (all_hanging / total_billable * 100) if total_billable > 0 else 0.0
         total_color = RED if total_pct >= 15 else (YELLOW if total_pct >= 5 else GREEN)
         print(f"  {CYAN}{'─' * (W - 4)}{RESET}")
-        print(f"  {WHITE}ALL TIME{RESET}")
+        print(f"  {WHITE}ALL TIME{RESET}  {_sparkline(all_working, all_hanging)}")
         print(f"    working    {WHITE}{_fmt_duration(all_working):<10}{RESET}")
         print(f"    hung       {total_color}{_fmt_duration(all_hanging):<10}  {total_pct:.1f}%{RESET}")
         print(f"    rendering  {WHITE}{_fmt_duration(all_rendering):<10}{RESET}")
@@ -888,6 +949,10 @@ def parse_args():
                         help='Refresh interval in seconds (default: 0.5)')
     parser.add_argument('--report', action='store_true',
                         help='Print a summary of all recorded weeks and exit')
+    parser.add_argument('--csv', action='store_true',
+                        help='With --report: emit CSV instead of the text dashboard')
+    parser.add_argument('--json', action='store_true',
+                        help='With --report: emit JSON instead of the text dashboard')
     return parser.parse_args()
 
 def clear_screen(full=False):
@@ -1073,7 +1138,7 @@ def start_monitoring(target_script_name=None, threshold_gb=None, interval_s=None
             if foreground_pid in active_instances:
                 last_max_active_time[foreground_pid] = time.time()
 
-            idle_threshold_s = CONFIG["monitoring"].get("idle_threshold_minutes", 0.083) * 60
+            idle_threshold_s = CONFIG["monitoring"].get("idle_threshold_seconds", 5.0)
             now = time.time()
             is_idle = not any(
                 now - last_max_active_time.get(pid, 0) <= idle_threshold_s
@@ -1154,7 +1219,8 @@ def main():
     try:
         args = parse_args()
         if args.report:
-            print_report()
+            fmt = "csv" if args.csv else ("json" if args.json else "text")
+            print_report(fmt=fmt)
             return
         start_monitoring(args.target, args.threshold, args.interval)
     except KeyboardInterrupt:

@@ -17,7 +17,9 @@ vitals                    # Default: search for 3dsmax / max_simulator
 vitals <process_name>     # Target a specific process
 
 # Print weekly time report
-vitals --report
+vitals --report                # Coloured text dashboard
+vitals --report --csv          # CSV for spreadsheet/pipeline use
+vitals --report --json         # JSON for programmatic use
 
 # Run the test suite
 python -m pytest tests/
@@ -29,7 +31,7 @@ python vitals_doctor.py
 ## Module map
 
 - **`vitals.py`** — Terminal UI, main monitor loop, alert state machine (`determine_state`), orchestration (`manage_orchestration`), VRAM/Storage daemons, `MemoryTracker` (deque sliding window), `_render_stats_box` / `_render_time_box`, `print_report()`, `_is_work_hours()`, and the `vitals` console entry point.
-- **`vitals_core.py`** — Windows API integration via ctypes. `find_processes`, `get_process_metrics`, `get_system_window_map` (single batch pass over all top-level windows), `is_process_responding` (`IsHungAppWindow`), `get_vram_metrics` (nvidia-smi + typeperf for shared-GPU bleed), `get_storage_metrics`, drive mapping, `get_foreground_pid`.
+- **`vitals_core.py`** — Windows API integration via ctypes. `find_processes`, `get_process_metrics`, `get_system_window_map` (single batch pass over all top-level windows), `is_process_responding` (`IsHungAppWindow`), `get_vram_metrics` (nvidia-smi + typeperf for shared-GPU bleed; sub-failures recorded in `VRAM_LAST_ERROR`), `get_storage_metrics`, drive mapping, `get_foreground_pid`.
 - **`vitals_stats.py`** — `SessionTracker`: weekly JSON persistence (`vitals_stats.json`), tick recording with bucket priority, exit-as-crash logic, week migration from old flat format, all-time aggregation in `summary()`.
 - **`vitals_doctor.py`** — Standalone diagnostic that benchmarks nvidia-smi latency, process scan cost, and admin permissions.
 - **`max_simulator.py`** — Synthetic Max-like workload for testing.
@@ -45,7 +47,7 @@ python vitals_doctor.py
 7. **Tick classification** (priority order — also the order of the `>` indicator in the UI):
    - HUNG (any instance not responding)
    - rendering (CPU > threshold, or title contains "rendering")
-   - idle (no Max foreground for `idle_threshold_minutes`, OR outside work hours)
+   - idle (no Max foreground for `idle_threshold_seconds`, OR outside work hours)
    - working
 8. `stats_tracker.record_tick(...)` accumulates seconds into the current week's bucket.
 9. `render_ui(...)` emits the stacked-bar dashboard, session tracker box, and time-breakdown box.
@@ -67,8 +69,7 @@ python vitals_doctor.py
 
 - `tier1` — CPU and RAM-spike thresholds.
 - `tier2` — system-RAM CRITICAL threshold and window.
-- `tier3` — affinity cores to strip (legacy; not currently applied automatically).
-- `monitoring` — `refresh_interval_seconds`, `vram_monitor_interval_seconds`, `memory_tracker_window_size_seconds`, `idle_threshold_minutes`.
+- `monitoring` — `refresh_interval_seconds`, `vram_monitor_interval_seconds`, `memory_tracker_window_size_seconds`, `idle_threshold_seconds`.
 - `schedule` — `enabled`, `work_start_weekday/hour`, `work_end_weekday/hour`. Outside this window, ticks count as idle.
 
 ## Stats persistence (`vitals_stats.json`)
@@ -94,9 +95,9 @@ Keys are ISO Monday-of-week strings. Old weeks are **never** deleted — the UI 
 
 ## Tests
 
-Tests live in `tests/`. Some files have versioned siblings (`_v2`, `_v3`) — the highest-versioned is current for that module. Windows-only ctypes are mocked so the suite runs on any platform.
+Tests live in `tests/`. Windows-only ctypes are mocked so the suite runs on any platform.
 
-Current suite: 124 tests, all passing.
+Current suite: 123 tests, all passing.
 
 ## Development mandates
 

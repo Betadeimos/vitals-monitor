@@ -14,7 +14,7 @@ class TestEntryPoint(unittest.TestCase):
     @patch('vitals.parse_args')
     @patch('vitals.start_monitoring')
     def test_main_with_args_calls_start_monitoring(self, mock_start, mock_parse):
-        """Test that calling main with arguments bypasses the wizard and starts monitoring."""
+        """Test that calling main with positional args passes them through to start_monitoring."""
         mock_args = MagicMock()
         mock_args.target = "custom_proc"
         mock_args.threshold = 200
