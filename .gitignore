@@ -150,3 +150,12 @@ cython_debug/
 
 # Vitals runtime data
 vitals_stats.json
+
+# Agent & IDE config
+GEMINI.md
+CLAUDE.md
+.claude/
+.gemini/
+.vscode/
+.idea/
+*.local.json
