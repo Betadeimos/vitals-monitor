@@ -28,7 +28,18 @@
       "Bash(git checkout *)",
       "Bash(git branch *)",
       "Bash(git add *)",
-      "Bash(git commit *)"
+      "Bash(git commit *)",
+      "Bash(git merge *)",
+      "Bash(python -m pytest tests/test_vitals_stats.py -v)",
+      "Bash(python -m pytest tests/ -x -q)",
+      "Bash(python -m pytest tests/ -q --ignore=tests/test_improvements_v2.py)",
+      "Bash(python -c ' *)",
+      "Bash(pip install *)",
+      "Bash(python -m pytest tests/test_vitals_stats.py::TestSessionTracker::test_hung_takes_precedence_over_rendering tests/test_vitals_process_termination.py -v)",
+      "Bash(findstr /s \"crash\\\\|hung\\\\|not responding\\\\|IsHungAppWindow\" tests\\\\*.py)",
+      "Bash(python -m pytest tests/test_entry_point.py -v)",
+      "Bash(C:/Users/d.chincoli/AppData/Local/Programs/Python/Python314/python.exe C:/Users/d.chincoli/.claude/statusline.py)",
+      "Bash(echo \"exit=$?\")"
     ]
   }
 }

@@ -35,8 +35,8 @@ DEFAULT_CONFIG = {
         "refresh_interval_seconds": 0.5,
         "vram_monitor_interval_seconds": 2.0,
         "memory_tracker_window_size_seconds": 5.0,
-        "idle_threshold_seconds": 5.0,
-        "idle_cutoff_seconds": 300.0
+        "waiting_threshold_seconds": 5.0,
+        "waiting_cutoff_seconds": 300.0
     },
     "schedule": {
         "enabled": True,
@@ -62,8 +62,12 @@ def load_config():
         return DEFAULT_CONFIG
 
     mon = cfg.setdefault("monitoring", {})
-    if "idle_threshold_seconds" not in mon and "idle_threshold_minutes" in mon:
-        mon["idle_threshold_seconds"] = float(mon.pop("idle_threshold_minutes")) * 60.0
+    if "waiting_threshold_seconds" not in mon and "idle_threshold_minutes" in mon:
+        mon["waiting_threshold_seconds"] = float(mon.pop("idle_threshold_minutes")) * 60.0
+    elif "waiting_threshold_seconds" not in mon and "idle_threshold_seconds" in mon:
+        mon["waiting_threshold_seconds"] = float(mon.pop("idle_threshold_seconds"))
+    if "waiting_cutoff_seconds" not in mon and "idle_cutoff_seconds" in mon:
+        mon["waiting_cutoff_seconds"] = float(mon.pop("idle_cutoff_seconds"))
     cfg.pop("tier3", None)
     return cfg
 
@@ -167,6 +171,7 @@ class MemoryTracker:
 # ANSI Escape Codes
 RESET = "\033[0m"
 CYAN = "\033[36m"
+BLUE = "\033[34m"
 GREEN = "\033[32m"
 YELLOW = "\033[33m"
 ORANGE = "\033[38;5;208m"
@@ -182,7 +187,7 @@ CLEAR_LINE = "\033[K"
 NORMAL = "NORMAL"
 WARNING = "WARNING"
 CRITICAL = "CRITICAL"
-HUNG = "HUNG"
+HANGING = "HANGING"
 
 PRIORITY_MAP = {
     32: "Normal",
@@ -197,7 +202,7 @@ def determine_state(metrics, system_ram_percent, tracker, threshold_gb=None, is_
     """
     Tier 1 (Warning): Triggered by sudden memory spikes OR high CPU.
     Tier 2 (Critical): Triggered ONLY when total system RAM exceeds threshold.
-    Tier 3 (Hung): Triggered if the process is not responding.
+    Tier 3 (Hanging): Triggered if the process is not responding.
     """
     if threshold_gb is None:
         threshold_gb = float(CONFIG["tier1"]["ram_spike_threshold_gb"])
@@ -205,7 +210,7 @@ def determine_state(metrics, system_ram_percent, tracker, threshold_gb=None, is_
         threshold_gb = float(threshold_gb)
 
     if not is_responding:
-        return HUNG, "Process is NOT RESPONDING (Hung)"
+        return HANGING, "Process is NOT RESPONDING (Hanging)"
 
     system_ram_threshold = float(CONFIG["tier2"]["system_ram_threshold_percent"])
     if system_ram_percent > system_ram_threshold:
@@ -257,7 +262,7 @@ def draw_bar(label, value, max_value, bar_length=40, char='■', state=NORMAL):
     ratio = min(max(value / max_value, 0.0), 1.0)
     filled_length = int(bar_length * ratio)
     
-    if state in (CRITICAL, HUNG):
+    if state in (CRITICAL, HANGING):
         color = RED_BLINK
     elif state == WARNING:
         color = YELLOW
@@ -303,7 +308,7 @@ def draw_stacked_ram_bar(target_gb, state=NORMAL):
 
     free_chars = max(bar_length - other_chars - target_chars, 0)
 
-    if state in (CRITICAL, HUNG):
+    if state in (CRITICAL, HANGING):
         target_color = RED_BLINK
     elif state == WARNING:
         target_color = YELLOW
@@ -353,26 +358,26 @@ def draw_stacked_cpu_bar(target_cpu_percent, system_cpu_percent=None, state=NORM
         else:
             target_chars -= excess
             
-    idle_chars = bar_length - other_chars - target_chars
+    empty_chars = bar_length - other_chars - target_chars
 
-    if state in (CRITICAL, HUNG):
+    if state in (CRITICAL, HANGING):
         target_color = RED_BLINK
     elif state == WARNING:
         target_color = YELLOW
     else:
         target_color = GREEN
-        
-    # Other Apps: '■' (White), Target: '■' (State Color), Idle: '-'
+
+    # Other Apps: '■' (White), Target: '■' (State Color), Empty: '-'
     other_bar = f"{WHITE}{'■' * other_chars}{RESET}"
     target_bar = f"{target_color}{'■' * target_chars}{RESET}"
-    idle_bar = "-" * idle_chars
-    
+    empty_bar = "-" * empty_chars
+
     label_color = get_usage_color(system_cpu_percent)
     label_str = f"{label_color}{'CPU':<12}{RESET}"
     border_open = f"{CYAN}[{RESET}"
     border_close = f"{CYAN}]{RESET}"
-    
-    return f"{label_str} {border_open}{other_bar}{target_bar}{idle_bar}{border_close} {system_cpu_percent:.1f}%"
+
+    return f"{label_str} {border_open}{other_bar}{target_bar}{empty_bar}{border_close} {system_cpu_percent:.1f}%"
 
 def draw_stacked_vram_bar(vram_metrics, state=NORMAL):
     bar_length = 40
@@ -423,7 +428,7 @@ def draw_stacked_vram_bar(vram_metrics, state=NORMAL):
         # Should not happen with logic above, but for safety:
         free_chars = max(0, bar_length - other_chars - target_chars)
 
-    if state in (CRITICAL, HUNG):
+    if state in (CRITICAL, HANGING):
         target_color = RED_BLINK
     elif state == WARNING:
         target_color = YELLOW
@@ -561,9 +566,13 @@ def _fmt_duration(seconds):
     return f"{s}s"
 
 
-def _draw_stats_bar(label, seconds, total_s, color, bar_length=30, active=False):
-    ratio = (seconds / total_s) if total_s > 0 else 0.0
-    filled = max(0, min(int(bar_length * ratio), bar_length))
+def _draw_stats_bar(label, seconds, total_s, color, bar_length=30, active=False, pct_total_s=None):
+    # pct_total_s allows us to calculate percentages relative to a total that might exclude rendering
+    calc_total = pct_total_s if pct_total_s is not None else total_s
+    ratio = (seconds / calc_total) if calc_total > 0 else 0.0
+    # Visual bar length is still relative to its own total (total_s) or just proportional
+    # For simplicity, we'll keep bar length relative to calc_total too so 100% = full bar
+    filled = max(0, min(int(round(bar_length * ratio)), bar_length))
     bar = "■" * filled + "-" * (bar_length - filled)
     pct = f"{ratio * 100:5.1f}%"
     dur = _fmt_duration(seconds)
@@ -594,7 +603,8 @@ def _render_stats_box(summary):
     except (ValueError, KeyError):
         ws = summary.get("week_start", "")
 
-    total_s  = summary["total_s"]
+    # Core total for percentages (excludes rendering)
+    total_exclusive = summary["working_s"] + summary["hanging_s"] + summary["waiting_s"]
     sessions = summary["session_count"]
     crashes  = summary["crash_count"]
     cur      = summary.get("active")
@@ -604,10 +614,18 @@ def _render_stats_box(summary):
         fline(f"{WHITE}S E S S I O N   T R A C K E R{RESET}", align="center"),
         fline(f"{CYAN}week of {ws}  |  {sessions} session{'s' if sessions != 1 else ''}{RESET}", align="center"),
         sep,
-        fline(_draw_stats_bar("WORKING", summary["working_s"], total_s, GREEN, active=(cur == "working"))),
-        fline(_draw_stats_bar("HUNG",    summary["hanging_s"], total_s, RED,   active=(cur == "hanging"))),
-        fline(_draw_stats_bar("IDLE",    summary["idle_s"],    total_s, CYAN,  active=(cur == "idle"))),
     ]
+
+    stats_to_draw = [
+        ("WORKING", summary["working_s"], GREEN, (cur == "working")),
+        ("HANGING", summary["hanging_s"], RED,   (cur == "hanging")),
+        ("WAITING", summary["waiting_s"], BLUE,  (cur == "waiting")),
+    ]
+    # Sort by duration descending
+    stats_to_draw.sort(key=lambda x: x[1], reverse=True)
+
+    for label, val, color, active in stats_to_draw:
+        lines.append(fline(_draw_stats_bar(label, val, total_exclusive, color, active=active, pct_total_s=total_exclusive)))
 
     if cur == "away":
         lines.append(fline(f"{YELLOW}[ TRACKING PAUSED — focus Max to resume ]{RESET}", align="center"))
@@ -617,11 +635,12 @@ def _render_stats_box(summary):
     render_mark = f"{YELLOW}>{RESET}" if cur == "rendering" else " "
     render_str = f"{render_mark} render: {_fmt_duration(summary['rendering_s'])}"
     crash_str  = f"crashes: {crashes}"
-    active_str = f"active: {_fmt_duration(summary['active_s'])}"
+    # 'lifetime' is total_s which includes everything
+    lifetime_str = f"lifetime: {_fmt_duration(summary['total_s'])}"
     inner = WIDTH - 4
     vis_render = len(ANSI_ESCAPE.sub("", render_str))
-    gap1 = max(2, (inner - vis_render - len(crash_str) - len(active_str)) // 2)
-    info_line = f"{WHITE}{render_str}{' ' * gap1}{crash_str}{' ' * gap1}{active_str}{RESET}"
+    gap1 = max(2, (inner - vis_render - len(crash_str) - len(lifetime_str)) // 2)
+    info_line = f"{WHITE}{render_str}{' ' * gap1}{crash_str}{' ' * gap1}{lifetime_str}{RESET}"
     lines.append(fline(info_line))
 
     at = summary.get("all_time")
@@ -629,8 +648,8 @@ def _render_stats_box(summary):
         at_str = (
             f"{CYAN}all-time:{RESET}  "
             f"{GREEN}work {_fmt_duration(at['working_s'])}{RESET}  "
-            f"{RED}hung {_fmt_duration(at['hanging_s'])}{RESET}  "
-            f"{CYAN}idle {_fmt_duration(at['idle_s'])}{RESET}  "
+            f"{RED}hanging {_fmt_duration(at['hanging_s'])}{RESET}  "
+            f"{BLUE}waiting {_fmt_duration(at['waiting_s'])}{RESET}  "
             f"{WHITE}s {at['session_count']}  c {at['crash_count']}{RESET}"
         )
         lines.append(sep)
@@ -652,8 +671,8 @@ def _format_compact_instance(inst):
     state = inst.get('state', NORMAL)
     is_rendering = inst.get('is_rendering', False)
 
-    if state == HUNG:
-        state_str = f"{RED_BLINK}HUNG{RESET}"
+    if state == HANGING:
+        state_str = f"{RED_BLINK}HANGING{RESET}"
     elif state == CRITICAL:
         state_str = f"{RED_BLINK}Critical{RESET}"
     elif state == WARNING:
@@ -808,8 +827,8 @@ def render_ui(metrics=None, storage_metrics=None, vram_metrics=None, system_cpu=
                 msg_line = f"{CYAN}{i_status}{RESET}"
         elif i_state == CRITICAL:
             msg_line = f"{RED_BLINK}!!! CRITICAL: SYSTEM RAM EXHAUSTED !!!{RESET}"
-        elif i_state == HUNG:
-            msg_line = f"{RED_BLINK}!!! PROCESS HUNG (NOT RESPONDING) !!!{RESET}"
+        elif i_state == HANGING:
+            msg_line = f"{RED_BLINK}!!! PROCESS HANGING (NOT RESPONDING) !!!{RESET}"
         elif i_state == WARNING:
             msg_line = f"{YELLOW}--- WARNING: STABILIZING RESOURCES ---{RESET}"
         else:
@@ -819,7 +838,7 @@ def render_ui(metrics=None, storage_metrics=None, vram_metrics=None, system_cpu=
         
         lines.append(format_line(msg_line, align='center'))
         if i_msg:
-            color = RED_BLINK if i_state in (CRITICAL, HUNG) else YELLOW
+            color = RED_BLINK if i_state in (CRITICAL, HANGING) else YELLOW
             lines.append(format_line(f"{color}{detail_line}{RESET}", align='center'))
         else:
             lines.append(format_line("", align='center'))
@@ -845,35 +864,70 @@ def render_ui(metrics=None, storage_metrics=None, vram_metrics=None, system_cpu=
     return result
 
 
-def _sparkline(working_s, hanging_s, width=20):
-    """20-char bar showing working/hung split. Empty = no billable time."""
-    total = working_s + hanging_s
+def _sparkline(working_s, hanging_s, waiting_s, width=30):
+    """30-char bar showing work/hang/wait split, ordered by duration."""
+    total = working_s + hanging_s + waiting_s
     if total <= 0:
         return f"{CYAN}[{'-' * width}]{RESET}"
-    w_chars = round((working_s / total) * width)
-    h_chars = width - w_chars
-    return (
-        f"{CYAN}[{GREEN}{'■' * w_chars}{RED}{'■' * h_chars}{CYAN}]{RESET}"
-    )
+    
+    # Define categories with their colors
+    cats = [
+        {"val": working_s, "color": GREEN},
+        {"val": hanging_s, "color": RED},
+        {"val": waiting_s, "color": BLUE}
+    ]
+    
+    # Initial proportional count (rounded)
+    for c in cats:
+        c["count"] = int(round(width * (c["val"] / total)))
+        # Ensure that if duration > 0, it gets at least 1 block if space allows
+        if c["val"] > 0 and c["count"] == 0 and width > sum(x.get("count", 0) for x in cats):
+             c["count"] = 1
+
+    # Adjust for rounding errors to ensure exactly 'width'
+    current_total = sum(c["count"] for c in cats)
+    if current_total != width:
+        # Adjust the largest segment to absorb the difference
+        largest = max(cats, key=lambda x: x["val"])
+        largest["count"] += (width - current_total)
+        # Ensure no negative counts
+        if largest["count"] < 0:
+            largest["count"] = 0
+
+    # Sort categories by duration descending for the visual bar
+    cats.sort(key=lambda x: x["val"], reverse=True)
+    
+    segments = []
+    for c in cats:
+        if c["count"] > 0:
+            segments.append(f"{c['color']}{'■' * c['count']}")
+            
+    bar_content = "".join(segments)
+    # Safety check: if bar_content is shorter than width due to 0 durations, pad with '-'
+    vis_len = len(ANSI_ESCAPE.sub('', bar_content))
+    if vis_len < width:
+        bar_content += f"{CYAN}{'-' * (width - vis_len)}"
+
+    return f"{CYAN}[{bar_content}{CYAN}]{RESET}"
 
 
 def _export_csv(weeks):
     """Plain CSV to stdout, one row per week plus an ALL-TIME row if >1 week."""
-    print("week_start,working_s,hanging_s,rendering_s,idle_s,billable_s,active_s,total_s,hung_pct,crashes,sessions")
+    print("week_start,working_s,hanging_s,rendering_s,waiting_s,billable_s,active_s,total_s,hanging_pct,crashes,sessions")
     totals = {"w": 0.0, "h": 0.0, "r": 0.0, "i": 0.0, "c": 0, "s": 0}
     for w in weeks:
         bill = w["billable_s"]
         pct = (w["hanging_s"] / bill * 100) if bill > 0 else 0.0
         print(
             f"{w['week_start']},{w['working_s']:.1f},{w['hanging_s']:.1f},"
-            f"{w['rendering_s']:.1f},{w['idle_s']:.1f},{bill:.1f},"
+            f"{w['rendering_s']:.1f},{w['waiting_s']:.1f},{bill:.1f},"
             f"{w['active_s']:.1f},{w['total_s']:.1f},{pct:.2f},"
             f"{w['crash_count']},{w['session_count']}"
         )
         totals["w"] += w["working_s"]
         totals["h"] += w["hanging_s"]
         totals["r"] += w["rendering_s"]
-        totals["i"] += w["idle_s"]
+        totals["i"] += w["waiting_s"]
         totals["c"] += w["crash_count"]
         totals["s"] += w["session_count"]
     if len(weeks) > 1:
@@ -915,45 +969,42 @@ def print_report(fmt="text"):
         print(f"\n{CYAN}+{'=' * (W - 2)}+{RESET}\n")
         return
 
-    all_working = all_hanging = all_rendering = all_idle = all_crashes = all_sessions = 0.0
-
+    # Aggregate all-time stats
+    all_working = all_hanging = all_rendering = all_waiting = all_crashes = all_sessions = 0.0
     for s in weeks:
-        try:
-            ws = datetime.strptime(s["week_start"], "%Y-%m-%d").strftime("%a %b %d, %Y")
-        except ValueError:
-            ws = s["week_start"]
-
-        billable = s["billable_s"]
-        hang_pct = (s["hanging_s"] / billable * 100) if billable > 0 else 0.0
-        hang_color = RED if hang_pct >= 15 else (YELLOW if hang_pct >= 5 else GREEN)
-
-        print(f"  {CYAN}Week of {ws}{RESET}  {_sparkline(s['working_s'], s['hanging_s'])}")
-        print(f"    working    {WHITE}{_fmt_duration(s['working_s']):<10}{RESET}")
-        print(f"    hung       {hang_color}{_fmt_duration(s['hanging_s']):<10}  {hang_pct:.1f}% of active time{RESET}")
-        print(f"    rendering  {WHITE}{_fmt_duration(s['rendering_s']):<10}{RESET}")
-        print(f"    idle       {WHITE}{_fmt_duration(s['idle_s']):<10}{RESET}")
-        print(f"    crashes {hang_color}{s['crash_count']}{RESET}   sessions {s['session_count']}")
-        print()
-
         all_working   += s["working_s"]
         all_hanging   += s["hanging_s"]
         all_rendering += s["rendering_s"]
-        all_idle      += s["idle_s"]
+        all_waiting   += s["waiting_s"]
         all_crashes   += s["crash_count"]
         all_sessions  += s["session_count"]
 
-    if len(weeks) > 1:
-        total_billable = all_working + all_hanging
-        total_pct = (all_hanging / total_billable * 100) if total_billable > 0 else 0.0
-        total_color = RED if total_pct >= 15 else (YELLOW if total_pct >= 5 else GREEN)
-        print(f"  {CYAN}{'─' * (W - 4)}{RESET}")
-        print(f"  {WHITE}ALL TIME{RESET}  {_sparkline(all_working, all_hanging)}")
-        print(f"    working    {WHITE}{_fmt_duration(all_working):<10}{RESET}")
-        print(f"    hung       {total_color}{_fmt_duration(all_hanging):<10}  {total_pct:.1f}%{RESET}")
-        print(f"    rendering  {WHITE}{_fmt_duration(all_rendering):<10}{RESET}")
-        print(f"    idle       {WHITE}{_fmt_duration(all_idle):<10}{RESET}")
-        print(f"    crashes {total_color}{int(all_crashes)}{RESET}   sessions {int(all_sessions)}")
-        print()
+    total_exclusive = all_working + all_hanging + all_waiting
+    billable_total = all_working + all_hanging
+    
+    items = [
+        ("WORKING", all_working, GREEN),
+        ("HANGING", all_hanging, RED),
+        ("WAITING", all_waiting, BLUE),
+    ]
+    items.sort(key=lambda x: x[1], reverse=True)
+
+    print(f"  {WHITE}ALL TIME{RESET}  {_sparkline(all_working, all_hanging, all_waiting)}")
+    for label, dur, color in items:
+        pct = (dur / total_exclusive * 100) if total_exclusive > 0 else 0.0
+        # Use same proportional bar as UI but maybe smaller? No, let's just match the style.
+        # For the report, we can use a simpler format but with uppercase labels.
+        print(f"    {color}{label:<10}{RESET} {_fmt_duration(dur):<10}  {pct:>5.1f}%")
+    
+    # Rendering as standalone line (no percentage)
+    print(f"    {'RENDERING':<10} {YELLOW}{_fmt_duration(all_rendering):<10}{RESET}")
+    
+    hang_pct = (all_hanging / billable_total * 100) if billable_total > 0 else 0.0
+    hang_severity_color = RED if hang_pct >= 15 else (YELLOW if hang_pct >= 5 else GREEN)
+    # Lifetime includes all-time total
+    total_lifetime = all_working + all_hanging + all_rendering + all_waiting
+    print(f"    crashes {hang_severity_color}{int(all_crashes)}{RESET}   sessions {int(all_sessions)}   lifetime {WHITE}{_fmt_duration(total_lifetime)}{RESET}")
+    print()
 
     print(f"{CYAN}+{'=' * (W - 2)}+{RESET}\n")
 
@@ -1015,7 +1066,7 @@ def start_monitoring(target_script_name=None, threshold_gb=None, interval_s=None
 
     active_instances = {}        # pid -> dict
     last_max_active_time = {}    # pid -> timestamp of last user input while Max was foreground
-    idle_accumulator_s = 0.0     # continuous idle seconds; resets on Max foreground
+    waiting_accumulator_s = 0.0  # continuous waiting seconds; resets on Max foreground
     last_input_tick = 0          # dwTime of last system input event seen this session
     vram_monitor = VRAMMonitor()
     storage_monitor = StorageMonitor()
@@ -1152,8 +1203,8 @@ def start_monitoring(target_script_name=None, threshold_gb=None, interval_s=None
             agg_rendering = False
             for inst in instances_data:
                 s = inst['state']
-                if s == HUNG:
-                    agg_state = HUNG
+                if s == HANGING:
+                    agg_state = HANGING
                     break
                 if s == CRITICAL:
                     agg_state = CRITICAL
@@ -1162,7 +1213,7 @@ def start_monitoring(target_script_name=None, threshold_gb=None, interval_s=None
                 if active_instances.get(inst['pid'], {}).get('is_rendering'):
                     agg_rendering = True
             # Update last-active timestamp only when actual user input was detected.
-            # GetLastInputInfo returns the same tick while the user is idle, so
+            # GetLastInputInfo returns the same tick while the user is inactive, so
             # Max sitting in the foreground while saving/loading doesn't reset the timer.
             # Falls back to foreground-only on non-Windows (get_last_input_tick returns 0).
             current_input_tick = vitals_core.get_last_input_tick()
@@ -1172,33 +1223,33 @@ def start_monitoring(target_script_name=None, threshold_gb=None, interval_s=None
                     last_max_active_time[foreground_pid] = time.time()
             last_input_tick = current_input_tick
 
-            idle_threshold_s = CONFIG["monitoring"].get("idle_threshold_seconds", 5.0)
-            idle_cutoff_s    = CONFIG["monitoring"].get("idle_cutoff_seconds", 300.0)
+            waiting_threshold_s = CONFIG["monitoring"].get("waiting_threshold_seconds", 5.0)
+            waiting_cutoff_s    = CONFIG["monitoring"].get("waiting_cutoff_seconds", 300.0)
             now = time.time()
-            is_idle = not any(
-                now - last_max_active_time.get(pid, 0) <= idle_threshold_s
+            is_waiting = not any(
+                now - last_max_active_time.get(pid, 0) <= waiting_threshold_s
                 for pid in active_instances
             )
             if not _is_work_hours():
-                is_idle = True
+                is_waiting = True
 
-            if is_idle:
-                idle_accumulator_s += interval_s
+            if is_waiting:
+                waiting_accumulator_s += interval_s
             else:
-                idle_accumulator_s = 0.0
-            is_away = is_idle and idle_accumulator_s > idle_cutoff_s
+                waiting_accumulator_s = 0.0
+            is_away = is_waiting and waiting_accumulator_s > waiting_cutoff_s
 
             if not is_away:
-                stats_tracker.record_tick(agg_state, agg_rendering and agg_state != HUNG, interval_s, is_idle=is_idle)
+                stats_tracker.record_tick(agg_state, agg_rendering and agg_state != HANGING, interval_s, is_waiting=is_waiting)
 
-            if agg_state == HUNG:
+            if agg_state == HANGING:
                 current_category = "hanging"
             elif agg_rendering:
                 current_category = "rendering"
             elif is_away:
                 current_category = "away"
-            elif is_idle:
-                current_category = "idle"
+            elif is_waiting:
+                current_category = "waiting"
             else:
                 current_category = "working"
 

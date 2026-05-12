@@ -16,7 +16,7 @@ def _blank_week():
         "working_seconds": 0.0,
         "hanging_seconds": 0.0,
         "rendering_seconds": 0.0,
-        "idle_seconds": 0.0,
+        "waiting_seconds": 0.0,
         "crash_count": 0,
         "session_count": 0,
     }
@@ -41,6 +41,10 @@ class SessionTracker:
                 old_data = {k: data[k] for k in _blank_week() if k in data}
                 weeks = {old_key: old_data} if old_key else {}
                 return {"weeks": weeks}
+            # Migrate idle_seconds → waiting_seconds
+            for week_data in data["weeks"].values():
+                if "idle_seconds" in week_data and "waiting_seconds" not in week_data:
+                    week_data["waiting_seconds"] = week_data.pop("idle_seconds")
             return data
         except (FileNotFoundError, json.JSONDecodeError):
             return {"weeks": {}}
@@ -68,21 +72,21 @@ class SessionTracker:
         self._week["session_count"] += 1
         self.save()
 
-    def record_tick(self, state, is_rendering, interval_s, is_idle=False):
-        if state == "HUNG":
+    def record_tick(self, state, is_rendering, interval_s, is_waiting=False):
+        if state == "HANGING":
             self._week["hanging_seconds"] += interval_s
         elif is_rendering:
             self._week["rendering_seconds"] += interval_s
-        elif is_idle:
-            self._week["idle_seconds"] += interval_s
+        elif is_waiting:
+            self._week["waiting_seconds"] += interval_s
         else:
             self._week["working_seconds"] += interval_s
         if time.monotonic() - self._last_save >= 30:
             self.save()
 
     def record_exit(self, last_state):
-        """Count as a crash only if Max was already hung or critically unstable."""
-        if last_state in ("HUNG", "CRITICAL"):
+        """Count as a crash only if Max was already hanging or critically unstable."""
+        if last_state in ("HANGING", "CRITICAL"):
             self._week["crash_count"] += 1
             self.save()
 
@@ -91,13 +95,13 @@ class SessionTracker:
     def _summarise_week(self, week_data, week_start):
         billable = week_data["working_seconds"] + week_data["hanging_seconds"]
         active   = billable + week_data["rendering_seconds"]
-        total    = active + week_data.get("idle_seconds", 0.0)
+        total    = active + week_data.get("waiting_seconds", 0.0)
         return {
             "week_start":    week_start,
             "working_s":     week_data["working_seconds"],
             "hanging_s":     week_data["hanging_seconds"],
             "rendering_s":   week_data["rendering_seconds"],
-            "idle_s":        week_data.get("idle_seconds", 0.0),
+            "waiting_s":     week_data.get("waiting_seconds", 0.0),
             "billable_s":    billable,
             "active_s":      active,
             "total_s":       total,
@@ -109,19 +113,19 @@ class SessionTracker:
         """Current week + all-time totals, for the live UI."""
         s = self._summarise_week(self._week, _current_week_start())
         totals = {"working_s": 0.0, "hanging_s": 0.0, "rendering_s": 0.0,
-                  "idle_s": 0.0, "crash_count": 0, "session_count": 0}
+                  "waiting_s": 0.0, "crash_count": 0, "session_count": 0}
         for data in self._store["weeks"].values():
             for k, v in _blank_week().items():
                 data.setdefault(k, v)
             totals["working_s"]    += data["working_seconds"]
             totals["hanging_s"]    += data["hanging_seconds"]
             totals["rendering_s"]  += data["rendering_seconds"]
-            totals["idle_s"]       += data["idle_seconds"]
+            totals["waiting_s"]    += data["waiting_seconds"]
             totals["crash_count"]  += data["crash_count"]
             totals["session_count"]+= data["session_count"]
         totals["billable_s"] = totals["working_s"] + totals["hanging_s"]
         totals["active_s"]   = totals["billable_s"] + totals["rendering_s"]
-        totals["total_s"]    = totals["active_s"] + totals["idle_s"]
+        totals["total_s"]    = totals["active_s"] + totals["waiting_s"]
         s["all_time"] = totals
         return s
 

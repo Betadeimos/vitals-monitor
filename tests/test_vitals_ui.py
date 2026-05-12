@@ -555,20 +555,20 @@ class TestAwayState(unittest.TestCase):
         return {
             "week_start": "2026-05-11",
             "working_s": 100.0, "hanging_s": 10.0, "rendering_s": 20.0,
-            "idle_s": 50.0, "billable_s": 110.0, "active_s": 130.0, "total_s": 180.0,
+            "waiting_s": 50.0, "billable_s": 110.0, "active_s": 130.0, "total_s": 180.0,
             "crash_count": 0, "session_count": 1,
             "active": active,
         }
 
-    def test_stats_box_idle_bar_present(self):
+    def test_stats_box_waiting_bar_present(self):
         from vitals import _render_stats_box
         result = self.strip_ansi(_render_stats_box(self._stats("working")))
-        self.assertIn("IDLE", result)
+        self.assertIn("WAITING", result)
 
-    def test_stats_box_idle_marker_when_idle_active(self):
+    def test_stats_box_waiting_marker_when_waiting_active(self):
         from vitals import _render_stats_box
-        result = self.strip_ansi(_render_stats_box(self._stats("idle")))
-        self.assertIn("> IDLE", result)
+        result = self.strip_ansi(_render_stats_box(self._stats("waiting")))
+        self.assertIn("> WAITING", result)
 
     def test_stats_box_shows_paused_notice_when_away(self):
         from vitals import _render_stats_box
@@ -579,8 +579,8 @@ class TestAwayState(unittest.TestCase):
         from vitals import _render_stats_box
         result = self.strip_ansi(_render_stats_box(self._stats("away")))
         self.assertNotIn("> WORKING", result)
-        self.assertNotIn("> HUNG", result)
-        self.assertNotIn("> IDLE", result)
+        self.assertNotIn("> HANGING", result)
+        self.assertNotIn("> WAITING", result)
 
 
 if __name__ == '__main__':

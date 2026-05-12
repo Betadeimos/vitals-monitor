@@ -4,7 +4,7 @@ import os
 import sys
 import subprocess
 
-# Windows-only imports for hung state detection
+# Windows-only imports for hanging state detection
 try:
     import ctypes
     from ctypes import wintypes
@@ -135,7 +135,7 @@ def is_process_responding(pid):
         return True
     
     try:
-        found_hung = [False]
+        found_hanging = [False]
         WNDENUMPROC = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_int, ctypes.c_void_p)
         
         def enum_handler(hwnd, lparam):
@@ -144,13 +144,13 @@ def is_process_responding(pid):
             if lp_pid.value == pid:
                 if ctypes.windll.user32.IsWindowVisible(hwnd):
                     if ctypes.windll.user32.IsHungAppWindow(hwnd):
-                        found_hung[0] = True
+                        found_hanging[0] = True
                         return False
             return True
 
         cb_handler = WNDENUMPROC(enum_handler)
         ctypes.windll.user32.EnumWindows(cb_handler, 0)
-        return not found_hung[0]
+        return not found_hanging[0]
     except Exception:
         return True
 

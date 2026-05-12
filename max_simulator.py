@@ -64,8 +64,8 @@ def run_simulation():
     try:
         while True:
             # Randomly decide behavior
-            # We include 'idle' multiple times to favor it
-            behavior = random.choice(['heavy', 'leak', 'idle', 'idle', 'idle'])
+            # We include 'waiting' multiple times to favor it
+            behavior = random.choice(['heavy', 'leak', 'waiting', 'waiting', 'waiting'])
             
             if behavior == 'heavy':
                 heavy_calculation(ram_mb=200, duration=5)
@@ -74,8 +74,8 @@ def run_simulation():
                 # but here fatal_memory_leak is infinite unless iterations are set.
                 fatal_memory_leak(chunk_mb=50, interval=1)
                 # If leak returns (e.g. error), we'd continue, but it's infinite.
-            else:
-                logging.info("[IDLE] Status: Normal operations...")
+            else:  # 'waiting'
+                logging.info("[WAITING] Status: Normal operations...")
                 time.sleep(random.uniform(2, 5))
             
     except KeyboardInterrupt:

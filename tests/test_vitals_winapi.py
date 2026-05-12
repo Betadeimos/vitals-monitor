@@ -42,14 +42,14 @@ class TestVitalsWinAPI(unittest.TestCase):
             return True
         
         mock_user32.EnumWindows.side_effect = side_effect_enum
-        mock_user32.IsHungAppWindow.return_value = False # NOT hung
+        mock_user32.IsHungAppWindow.return_value = False # NOT hanging
         
         self.assertTrue(vitals_core.is_process_responding(1234))
         mock_user32.IsHungAppWindow.assert_called_with(100)
 
     @patch('os.name', 'nt')
     @patch('vitals_core.ctypes', create=True)
-    def test_is_process_responding_windows_hung(self, mock_ctypes):
+    def test_is_process_responding_windows_hanging(self, mock_ctypes):
         # Mocking ctypes structures and functions
         mock_user32 = mock_ctypes.windll.user32
         
@@ -68,7 +68,7 @@ class TestVitalsWinAPI(unittest.TestCase):
             return True
         
         mock_user32.EnumWindows.side_effect = side_effect_enum
-        mock_user32.IsHungAppWindow.return_value = True # HUNG
+        mock_user32.IsHungAppWindow.return_value = True # HANGING
         
         self.assertFalse(vitals_core.is_process_responding(1234))
         mock_user32.IsHungAppWindow.assert_called_with(100)
@@ -100,7 +100,7 @@ class TestVitalsWinAPI(unittest.TestCase):
 
     @patch('os.name', 'nt')
     @patch('vitals_core.ctypes', create=True)
-    def test_is_process_responding_windows_ignore_hidden_hung_window(self, mock_ctypes):
+    def test_is_process_responding_windows_ignore_hidden_hanging_window(self, mock_ctypes):
         # Mocking ctypes structures and functions
         mock_user32 = mock_ctypes.windll.user32
         
@@ -114,8 +114,8 @@ class TestVitalsWinAPI(unittest.TestCase):
         mock_ctypes.WINFUNCTYPE.return_value = lambda x: x
         
         # Simulate EnumWindows calling the callback with two windows
-        # Window 101: Visible, NOT hung
-        # Window 102: Hidden, Hung
+        # Window 101: Visible, NOT hanging
+        # Window 102: Hidden, Hanging
         def side_effect_enum(callback, lparam):
             callback(101, lparam)
             callback(102, lparam)
@@ -130,17 +130,17 @@ class TestVitalsWinAPI(unittest.TestCase):
             
         mock_user32.IsWindowVisible.side_effect = side_effect_is_visible
         
-        def side_effect_is_hung(hwnd):
+        def side_effect_is_hanging(hwnd):
             if hwnd == 101: return False
             if hwnd == 102: return True
             return False
             
-        mock_user32.IsHungAppWindow.side_effect = side_effect_is_hung
-        
-        # Should be True because the visible window (101) is not hung
+        mock_user32.IsHungAppWindow.side_effect = side_effect_is_hanging
+
+        # Should be True because the visible window (101) is not hanging
         self.assertTrue(vitals_core.is_process_responding(1234))
         
-        # Should have checked visibility for both, but hung state only for the visible one
+        # Should have checked visibility for both, but hanging state only for the visible one
         mock_user32.IsWindowVisible.assert_any_call(101)
         mock_user32.IsWindowVisible.assert_any_call(102)
         mock_user32.IsHungAppWindow.assert_called_once_with(101)
